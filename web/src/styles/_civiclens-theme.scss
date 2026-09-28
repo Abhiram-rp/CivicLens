@@ -1,0 +1,147 @@
+// CivicLens theme - an EXPLICIT accessible palette, not a Material default.
+//
+// SPEC.md 14 requires an "explicitly defined accessible theme" because
+// Material's shipped defaults do not meet WCAG 2.1 AA, and REQUIREMENTS.md 8
+// makes AA on citizen flows a launch gate. A comment claiming a palette is
+// accessible is not a check, so every value lives in `_tokens.scss` and
+// `theme.spec.ts` measures each pair against its declared floor. Editing a
+// colour to something that fails fails the build rather than the launch.
+
+@use '@angular/material' as mat;
+@use 'tokens' as t;
+
+// Tonal steps assembled from the explicit tokens, rather than
+// mat.$azure-palette. M3 would otherwise derive every on-* pairing from the
+// base hue, and a derived pairing is precisely the value that drifts below AA
+// when someone nudges the hue. Here the light steps are chosen, not computed.
+$_primary: (
+  0: #ffffff,
+  10: #c7e9ea,
+  20: #a8d5d7,
+  30: #85bec1,
+  40: #5fa8ab,
+  50: #379396,
+  60: t.$primary, // 8.46:1 against white
+  70: #00474b,
+  80: t.$primary-hover, // hover/active, 11.72:1
+  90: #002f32,
+  95: #001f21,
+  100: #000000,
+);
+
+$_secondary: (
+  0: #ffffff,
+  10: t.$secondary, // 13.02:1 with on-secondary
+  20: #bbc8c9,
+  30: #9eadad,
+  40: #839495,
+  50: #6d7d7e,
+  60: #586769,
+  70: #465355,
+  80: #383f41,
+  90: #262a2c,
+  95: #1d2122,
+  100: #000000,
+);
+
+$_tertiary: (
+  0: #ffffff,
+  10: t.$tertiary, // 14.39:1 with on-tertiary - priority accents
+  20: #ffdc9e,
+  30: #fdc26c,
+  40: #d99b2b,
+  50: #b37700,
+  60: #8f5f00,
+  70: #764d00,
+  80: #5f3e00,
+  90: #4d3200,
+  95: #402900,
+  100: #000000,
+);
+
+$_error: (
+  0: #ffffff,
+  10: #ffdad6,
+  20: #ffb4ab,
+  30: #ff897d,
+  40: #ff544a,
+  50: #de2e21,
+  60: t.$error, // 6.54:1 with on-error
+  70: #93150e,
+  80: #77070a,
+  90: #610006,
+  95: #4c0008,
+  100: #000000,
+);
+
+@mixin civiclens-theme() {
+  @include mat.theme(
+    (
+      color: (
+        primary: $_primary,
+        secondary: $_secondary,
+        tertiary: $_tertiary,
+        error: $_error,
+      ),
+      typography: Roboto,
+      density: 0,
+    )
+  );
+
+  // Explicit overrides for the system tokens the citizen flows depend on. M3's
+  // derived defaults are not assumed to be AA: they are computed from the base
+  // hue and were never designed against a contrast requirement.
+  @include mat.theme-overrides(
+    (
+      on-surface: t.$on-surface,
+      on-surface-variant: t.$on-surface-variant,
+      outline: t.$outline,
+      outline-variant: t.$outline-variant,
+      primary: t.$primary,
+      on-primary: t.$on-primary,
+      error: t.$error,
+      on-error: t.$on-error,
+      tertiary: t.$tertiary,
+      on-tertiary: t.$on-tertiary,
+      secondary: t.$secondary,
+      on-secondary: t.$on-secondary,
+      inverse-surface: t.$inverse-surface,
+      on-inverse-surface: t.$on-inverse-surface,
+    )
+  );
+
+  // A project-owned vocabulary for application CSS.
+  //
+  // Components reach for `--cl-*` rather than `--mat-sys-*` so that a Material
+  // upgrade, which is free to rename or re-derive system tokens, does not reach
+  // into every template. The values are the same SCSS variables the Material
+  // overrides above use, so this cannot drift from the palette: there is one
+  // source, `_tokens.scss`, and `theme.spec.ts` measures it.
+  //
+  // `surface-container` and `outline-variant` are the two the app needs most and
+  // that M3 does not define a system token for, so they come straight from the
+  // tokens file.
+  @include civiclens-colors();
+}
+
+/// Emitted on `:root` by `styles.scss`. Kept as its own mixin so the mapping is
+/// written once and referenced by both the theme and the global styles.
+@mixin civiclens-colors() {
+  --cl-surface: #{t.$surface};
+  --cl-surface-container: #{t.$surface-container};
+  --cl-on-surface: #{t.$on-surface};
+  --cl-on-surface-variant: #{t.$on-surface-variant};
+  --cl-primary: #{t.$primary};
+  --cl-primary-hover: #{t.$primary-hover};
+  --cl-on-primary: #{t.$on-primary};
+  --cl-secondary: #{t.$secondary};
+  --cl-on-secondary: #{t.$on-secondary};
+  --cl-tertiary: #{t.$tertiary};
+  --cl-on-tertiary: #{t.$on-tertiary};
+  --cl-error: #{t.$error};
+  --cl-on-error: #{t.$on-error};
+  --cl-outline: #{t.$outline};
+  --cl-outline-variant: #{t.$outline-variant};
+  --cl-inverse-surface: #{t.$inverse-surface};
+  --cl-on-inverse-surface: #{t.$on-inverse-surface};
+}

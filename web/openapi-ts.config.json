@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/@hey-api/openapi-ts/config.schema.json",
+  "input": "../api/openapi/civiclens-v1.yaml",
+  "output": {
+    "path": "src/app/api/generated"
+  },
+  "postProcess": ["prettier"],
+  "plugins": [
+    {
+      "name": "@hey-api/typescript",
+      "standalone": true,
+      "dts": {
+        "headers": {
+          "//": [
+            "GENERATED FILE - DO NOT EDIT.",
+            "",
+            "Produced from api/openapi/civiclens-v1.yaml by @hey-api/openapi-ts.",
+            "Regenerate with `npm run gen:api`. Editing this file by hand makes",
+            "the next generation silently discard the change, which is why the",
+            "drift check in scripts/check-generated-api.mjs compares the checked-in",
+            "output against a fresh generation rather than trusting a comment."
+          ]
+        }
+      }
+    },
+    {
+      "name": "@hey-api/sdk",
+      "operations": {
+        "strategy": "byTags"
+      }
+    }
+  ]
+}

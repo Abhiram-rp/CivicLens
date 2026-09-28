@@ -1,0 +1,56 @@
+// CivicLens global styles.
+//
+// The theme is an explicit accessible palette rather than a Material default -
+// see `_civiclens-theme.scss` for why, and `theme.spec.ts` for the measured
+// contrast assertions that make the claim checkable.
+
+@use 'styles/civiclens-theme';
+
+html {
+  height: 100%;
+  @include civiclens-theme.civiclens-theme();
+}
+
+:root {
+  // The project-owned colour vocabulary application CSS uses. Same source
+  // variables as the Material overrides, so the two cannot disagree.
+  @include civiclens-theme.civiclens-colors();
+}
+
+body {
+  color-scheme: light;
+  background-color: var(--cl-surface);
+  color: var(--cl-on-surface);
+  font: var(--mat-sys-body-medium);
+  margin: 0;
+  height: 100%;
+}
+
+// A visible focus ring on every interactive element, not only the ones
+// Material styles itself. A keyboard user must be able to see where they are
+// on a page that is mostly custom components, and `:focus-visible` keeps the
+// ring off mouse clicks so it does not become visual noise.
+:focus-visible {
+  outline: 2px solid var(--cl-primary);
+  outline-offset: 2px;
+}
+
+// Never remove a focus ring outright. `outline: none` with nothing in its place
+// is the single most common way a design system quietly fails AA.
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+// Respect a stated preference for less motion. The shell has no animation of its
+// own, but Material's do, and vestibular discomfort is a real cost of a
+// transition nobody asked for.
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
