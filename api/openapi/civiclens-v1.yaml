@@ -23,9 +23,9 @@ openapi: 3.1.0
 #     x-required-roles is NON-EMPTY. Operations that accept an EITHER a session
 #     OR a tracking token (POST /issues and the whole /tracked tree) carry an
 #     empty x-required-roles and are checked in the service layer, because
-#     @PreAuthorize cannot express "anonymous OR CITIZEN".
+#     @PreAuthorize cannot express "concealed OR CITIZEN".
 #
-# Anonymity rules encoded here (see docs/SPEC.md section 6):
+# Concealment rules encoded here (see docs/SPEC.md section 6):
 #   - A report's identity is EITHER a user id OR an unguessable tracking token.
 #     It is never both, and `publicCode` is never a credential.
 #   - The tracking token is returned exactly once, in the 201 body, and is
@@ -80,9 +80,15 @@ tags:
     description: Unauthenticated, redacted, rate-limited
   - name: tracked
     description: |
-      The anonymous reporter's own reports, authenticated by an unguessable
+      The concealed reporter's own reports, authenticated by an unguessable
       tracking token presented in a header. Unauthenticated in the JWT sense
       but strictly scoped — a token reaches only the issues created with it.
+  - name: contact
+    description: |
+      Channel verification and the reporter approval gate, authorised solely by
+      a single-use token from the contact store. The only surface that can read
+      that store, and the reason concealment is possible without leaving a
+      citizen with no way to be told what happened to their report.
   - name: notifications
     description: In-app notifications
   - name: dashboard
@@ -258,7 +264,7 @@ paths:
   /issues:
     post:
       tags: [issues]
-      summary: Report an issue (signed in, or anonymously)
+      summary: Report an issue (signed in, or with my identity concealed)
       description: |
         Multipart because a report carries up to 3 photos. Photos are
         normalized **server-side** (EXIF orientation applied, HEIC transcoded,
@@ -268,7 +274,7 @@ paths:
         ## Two ways in, one endpoint
 
         A valid `Authorization` header means a signed-in CITIZEN is the
-        reporter. No header means the report is anonymous and the caller is
+        reporter. No header means the report is concealed and the caller is
         identified by the tracking token issued in the 201 body. One endpoint
         rather than two, because the multipart contract, validation, duplicate
         detection and idempotency are identical, and two copies of them would
@@ -282,23 +288,39 @@ paths:
         staff user and pull it into that user's citizen-scope queries.
 
         A present-but-invalid `Authorization` header is a 401. A missing one is
-        never an error here — that is the anonymous path, and answering 401
+        never an error here — that is the concealed path, and answering 401
         would make reporting without an account impossible.
 
         ## Disclosure
 
-        `disclosure` is the reporter's explicit choice, never inferred:
+        `disclosure` is the reporter's explicit choice, never inferred, and
+        **there is no default**. The form presents both options with equal
+        weight and refuses to submit until one is chosen, because a preselected
+        "share my details" is a default consent the reporter never gave.
 
         - `SHARE_DETAILS` — the reporter's name and contact details are visible
           to the staff handling the issue.
-        - `ANONYMOUS` — the issue is recorded with no reporter identity at all
-          and staff see it as coming from an anonymous citizen.
+        - `CONCEALED` — the reporter's identity is hidden from every manager,
+          officer and admin. The platform still holds a contact channel so it
+          can *tell the reporter* things; that channel is the one thing it
+          holds, and it is held in a separate store that the operational
+          database has no join path to.
+
+        This is **concealment, not anonymity**: the platform can identify the
+        reporter, staff cannot. A concealed report requires `reporterContact`
+        (see `ReporterContact`), because the approval gate in §4 needs a way to
+        reach the reporter and there is nowhere to deliver a notification to a
+        person the platform has no address for.
+
+        Concealment is a one-way door. `POST /tracked/issues/{id}/reveal` lets
+        a reporter decide later, and it cannot be undone once an officer has
+        seen a name.
 
         ## The tracking token
 
         `publicCode` is a dense sequential range starting at `CIV-100001` and is
         therefore enumerable, so it is a share handle and **never** a
-        credential. An anonymous report is instead tracked by a separate
+        credential. A concealed report is instead tracked by a separate
         unguessable token returned exactly once here. It is *derived* from a
         stored nonce under a server-side pepper, is persisted only as a hash,
         is scoped to the issues created with it, and is presented in the
@@ -309,8 +331,8 @@ paths:
         token is an idempotent replay, and that requires the original
         `Idempotency-Key` presented by the same reporter identity — a control
         the client already holds, and one scoped no more widely than the token
-        itself. A citizen who loses both loses access to the anonymous report.
-        That is the intended trade for anonymity, and it is why the response
+        itself. A citizen who loses both loses access to the concealed report.
+        That is the intended trade for concealment, and it is why the response
         tells the client to store the token before anything else.
 
         The token travels in a header rather than the query string so it stays
@@ -338,7 +360,7 @@ paths:
         ## Rate limit
 
         The bucket is keyed on the user id when signed in and on a salted hash
-        of the client IP when anonymous, so anonymous spam is still bounded
+        of the client IP when concealed, so concealed spam is still bounded
         without the bucket key itself identifying anyone.
       operationId: createIssue
       x-required-roles: []
@@ -392,10 +414,10 @@ paths:
         reports, or         `?q=` becomes an enumeration primitive over other people's
         reports.
 
-        Anonymous reports are in scope for officers, managers and admins like
-        any other issue, with `reporterId` null and `disclosure: ANONYMOUS`.
+        Concealed reports are in scope for officers, managers and admins like
+        any other issue, with `reporterId` null and `disclosure: CONCEALED`.
         They are never in a citizen's scope, not even that citizen's own —
-        an anonymous report is reachable only through `/tracked/**`.
+        a concealed report is reachable only through `/tracked/**`.
       operationId: listIssues
       x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
       parameters:
@@ -487,7 +509,7 @@ paths:
         to prevent.
 
         A CITIZEN reaches only their own signed-in reports here. Their own
-        *anonymous* reports are deliberately not reachable from this path,
+        *concealed* reports are deliberately not reachable from this path,
         because doing so would require accepting a tracking token here and
         quietly turning a role-scoped endpoint into a bearer-token one. They use
         `/tracked/issues/{issueId}` instead.
@@ -798,6 +820,21 @@ paths:
         has nothing to photograph). The resulting ResolutionReport is what the
         AI summary is written against in P3, so it is created here rather than
         as a comment.
+
+        ## This proposes, it does not close
+
+        Resolving moves the report to `RESOLVED` and puts an approval request in
+        front of the reporter. **Nothing is `CLOSED` until the reporter answers**,
+        and the answer may be a dispute, which sends it to `REOPENED`. The
+        reporter approves through `POST /contact/decision` from the emailed
+        link, or through `POST /issues/{id}/confirm` when signed in.
+
+        The reporter is notified on this transition - over `EMAIL` for a
+        concealed reporter, in-app for a signed-in one - and `approvalDeadline`
+        is set to `REOPEN_WINDOW_DAYS` out. If the notification cannot be
+        delivered, the report does **not** drift towards closing on a timer: it
+        becomes visible to the manager as an undeliverable approval request, and
+        closing it stays a human decision.
       operationId: resolveIssue
       x-required-roles: [FIELD_OFFICER]
       requestBody:
@@ -807,7 +844,9 @@ paths:
             schema: { $ref: '#/components/schemas/ResolveForm' }
       responses:
         '200':
-          description: Resolved. Status becomes RESOLVED and the reporter is notified.
+          description: |
+            Proposed. Status becomes `RESOLVED`, the reporter has been asked to
+            approve, and `approvalDeadline` is set. The report is not closed yet.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/IssueDetail' }
@@ -940,7 +979,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
 
   # ===========================================================================
-  # TRACKED (anonymous reporter, token in header)
+  # TRACKED (concealed reporter, token in header)
   # ===========================================================================
   # A separate tree rather than extra credentials on the /issues paths, for two
   # reasons. First, it keeps the x-required-roles drift assertion meaningful:
@@ -958,9 +997,9 @@ paths:
         reports from a shared kiosk or a family phone accumulates several
         reports under one token, so this is a list and not a single resource.
 
-        Status is read live. There are no in-app notifications for an anonymous
+        Status is read live. There are no in-app notifications for a concealed
         report — a notification needs an account to deliver to — so this
-        endpoint is how an anonymous reporter finds out what happened.
+        endpoint is how a concealed reporter finds out what happened.
       operationId: listTrackedIssues
       x-required-roles: []
       security: []
@@ -970,7 +1009,7 @@ paths:
         - $ref: '#/components/parameters/SizeParam'
       responses:
         '200':
-          description: A page of the caller's own anonymous reports
+          description: A page of the caller's own concealed reports
           headers:
             X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
             X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
@@ -997,9 +1036,9 @@ paths:
       - $ref: '#/components/parameters/TrackingTokenHeader'
     get:
       tags: [tracked]
-      summary: Track one of my anonymous reports
+      summary: Track one of my concealed reports
       description: |
-        The anonymous counterpart of `GET /issues/{issueId}`, built from an
+        The concealed counterpart of `GET /issues/{issueId}`, built from an
         explicit allowlist (`TrackedIssueDetail`) rather than from IssueDetail
         with fields nulled. Reporter fields are structurally absent, exact
         coordinates are rounded to the ~100m grid exactly as on the public page,
@@ -1024,7 +1063,7 @@ paths:
         '429': { $ref: '#/components/responses/RateLimited' }
     put:
       tags: [tracked]
-      summary: Edit my anonymous report
+      summary: Edit my concealed report
       description: |
         Same rule as the signed-in path: only while SUBMITTED or AI_ANALYZING.
         After triage the report is an official record and is corrected through
@@ -1063,7 +1102,7 @@ paths:
       - $ref: '#/components/parameters/TrackingTokenHeader'
     get:
       tags: [tracked]
-      summary: List the public comments on my anonymous report
+      summary: List the public comments on my concealed report
       description: |
         INTERNAL comments are filtered out server-side. A test asserts the
         response contains no `visibility: INTERNAL` row, because an internal
@@ -1089,10 +1128,10 @@ paths:
         '429': { $ref: '#/components/responses/RateLimited' }
     post:
       tags: [tracked]
-      summary: Comment on my anonymous report
+      summary: Comment on my concealed report
       description: |
         Always PUBLIC — there is no role here for a server-decided INTERNAL to
-        contrast with. The author is recorded as the anonymous reporter, and
+        contrast with. The author is recorded as the concealed reporter, and
         the comment is attributable to the token, not to a person.
       operationId: addTrackedComment
       x-required-roles: []
@@ -1123,10 +1162,10 @@ paths:
       - $ref: '#/components/parameters/TrackingTokenHeader'
     post:
       tags: [tracked]
-      summary: Confirm the fix on my anonymous report
+      summary: Confirm the fix on my concealed report
       description: |
-        The anonymous counterpart of `POST /issues/{issueId}/confirm`, and it is
-        the only way an issue ever reaches CLOSED. An anonymous reporter who
+        The concealed counterpart of `POST /issues/{issueId}/confirm`, and it is
+        the only way an issue ever reaches CLOSED. A concealed reporter who
         is satisfied closes their own report; nobody closes it for them.
       operationId: confirmTrackedResolution
       x-required-roles: []
@@ -1152,7 +1191,7 @@ paths:
       - $ref: '#/components/parameters/TrackingTokenHeader'
     post:
       tags: [tracked]
-      summary: Reopen my anonymous report
+      summary: Reopen my concealed report
       description: |
         Same preconditions as the signed-in path, including the 14-day window.
         A reason is required and is recorded in the audit trail, attributed to
@@ -1193,6 +1232,175 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorEnvelope' }
         '429': { $ref: '#/components/responses/RateLimited' }
 
+  /tracked/issues/{issueId}/reveal:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+      - $ref: '#/components/parameters/TrackingTokenHeader'
+    post:
+      tags: [tracked]
+      summary: Choose to reveal who I am, after submitting
+      description: |
+        A reporter who picked `CONCEALED` may change their mind once the issue
+        is underway. The new contact is verified before it takes effect, for
+        the same reason the original one was: a leaked tracking token must not
+        be enough to deconceal a report, or the concealment guarantee would
+        rest on the secrecy of a bearer credential rather than on anything.
+
+        **One-way.** There is no inverse operation, because an officer who has
+        seen a name cannot unsee it. The UI says so before the reporter
+        confirms, not after.
+      operationId: revealTrackedIssue
+      x-required-roles: []
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/ReporterContact'
+                - type: object
+                  required: [contactDisclosureNote]
+                  properties:
+                    contactDisclosureNote: { type: string, enum: ['1'] }
+      responses:
+        '202':
+          description: |
+            Reveal requested. The contact is being verified, and the issue
+            stays concealed - and out of every queue - until it is.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrackedIssueDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Already SHARE_DETAILS, or a reveal is already in flight
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ===========================================================================
+  # CONTACT - the only surface that can read the contact store
+  # ===========================================================================
+  # These two operations exist because a concealed reporter has no account and
+  # no reason to still be holding the tracking token when the officer's
+  # resolution lands - the email that carries the link is often opened on a
+  # different device. Both are authorised purely by a single-use token minted
+  # in the contact store, never by a session and never by the tracking token.
+  #
+  # A token in the path is normally wrong. It is acceptable *here* and only
+  # here, because these tokens prove no more than ownership of a channel: they
+  # are single-use, short-lived (CONTACT_VERIFICATION_TTL_MINUTES /
+  # DECISION_TTL_DAYS), and grant no access to report content on their own. The
+  # tracking token, which does grant content access, stays in a header.
+
+  /contact/verify:
+    post:
+      tags: [contact]
+      summary: Prove I own the address on this report
+      description: |
+        Completes double opt-in. Until it succeeds the report is
+        `PENDING_VERIFICATION` and is held out of every triage, assignment and
+        SLA queue - the verification gate is what stops the contact channel
+        being used to make a stranger receive mail about a problem they never
+        reported.
+
+        Deliberately answers 204 with an empty body on success: it must not
+        echo the address back, because a response that returns the address is a
+        response that will end up in a log.
+      operationId: verifyContact
+      x-required-roles: []
+      security: []
+      parameters:
+        - name: verificationToken
+          in: query
+          required: true
+          description: |
+            Single-use token from the verification link. Query rather than path
+            so it cannot be captured by an intermediary that logs paths.
+          schema: { type: string, minLength: 20, maxLength: 200 }
+      responses:
+        '204':
+          description: Verified. The report is now visible to queues and to notifications.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '410':
+          description: Verification token already used, or expired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /contact/decision:
+    post:
+      tags: [contact]
+      summary: Approve the officer's fix, or dispute it
+      description: |
+        The approval gate. An officer's `POST /issues/{id}/resolve` proposes a
+        fix; nothing is `CLOSED` until the reporter answers here, and the answer
+        may be `DISPUTE`, which sends the report to `REOPENED` with the reason
+        attached.
+
+        **This gate is the same for every reporter.** Concealment changes who can
+        *see* the reporter; it does not change the lifecycle. One rule is easier
+        to explain to a citizen, easier to test exhaustively, and stops the
+        close path from having two subtly different branches depending on a
+        disclosure flag.
+
+        Works for concealed reporters with no account, and for signed-in ones
+        too - the signed-in path keeps `POST /issues/{id}/confirm` and
+        `/reopen`, which do the same thing through the session. Both write the
+        same audit row.
+      operationId: submitContactDecision
+      x-required-roles: []
+      security: []
+      parameters:
+        - name: decisionToken
+          in: query
+          required: true
+          schema: { type: string, minLength: 20, maxLength: 200 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContactDecisionRequest' }
+      responses:
+        '200':
+          description: |
+            Recorded. `APPROVE` closes the report; `DISPUTE` reopens it.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueSummary' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The report is no longer awaiting a decision
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '410':
+          description: Decision token expired, or the approval window has closed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
   # ===========================================================================
   # PUBLIC
   # ===========================================================================
@@ -1221,14 +1429,14 @@ paths:
         that way: a public code in a chat message is a real thing people will
         paste, and the range behind it is walkable.
 
-        **Title redaction for anonymous reports.** When the reporter chose
-        `disclosure: ANONYMOUS`, `title` is replaced with the category name and
+        **Title redaction for concealed reports.** When the reporter chose
+        `disclosure: CONCEALED`, `title` is replaced with the category name and
         `titleRedacted` is true. A citizen's own words are frequently the
         identifying detail — "my gate is broken, I am at house number 12" — so
-        publishing the title of an anonymous report can deanonymize it just as
+        publishing the title of a concealed report can deanonymize it just as
         effectively as publishing a name. The flag is returned so the page can
         render it honestly rather than presenting redacted text as if it were
-        what was written. Note this reveals that a report is anonymous, which is
+        what was written. Note this reveals that a report is concealed, which is
         a far smaller disclosure than revealing who wrote it.
 
         Rate limited to 60 requests per minute per IP.
@@ -1856,10 +2064,10 @@ components:
         `tracked-write`, `public-read`, `ai-analysis` - and **nothing else**.
 
         The identity segment of the Redis key (user id, or salted IP hash for
-        anonymous buckets) is deliberately omitted, and is what SPEC.md 7.5 sends
+        concealed buckets) is deliberately omitted, and is what SPEC.md 7.5 sends
         to metrics instead. A truncated salted hash is not reversible and so
         does not deanonymize anyone, but it is a *stable correlation handle*:
-        emitting it lets a reader of any client-side log group one anonymous
+        emitting it lets a reader of any client-side log group one concealed
         reporter's requests together, and under a shared-address bucket it
         confirms that two strangers were rate-limited by the same identity -
         which is precisely the enumeration aid the "never to the client" rule
@@ -1911,7 +2119,7 @@ components:
       in: header
       required: true
       description: |
-        The unguessable token issued in the 201 body of an anonymous report,
+        The unguessable token issued in the 201 body of a concealed report,
         stored client-side. It authorises access to exactly the issues created
         with it and nothing else.
 
@@ -1954,8 +2162,8 @@ components:
         detection built in P2 and P3.
 
         "The same reporter" means the user id when signed in, and the salted IP
-        hash when anonymous, so one anonymous reporter retrying cannot collide
-        with an unrelated anonymous reporter who happened to generate the same
+        hash when concealed, so one concealed reporter retrying cannot collide
+        with an unrelated concealed reporter who happened to generate the same
         UUID.
 
         A replay returns the original body *including* the original
@@ -2069,9 +2277,81 @@ components:
       type: string
       description: |
         How much of the reporter's identity is attached to the issue. The
-        reporter's explicit choice, recorded on the issue and never inferred.
-        See `POST /issues`.
-      enum: [SHARE_DETAILS, ANONYMOUS]
+        reporter's explicit choice, recorded on the issue and never inferred,
+        and never defaulted: the form will not submit without one. See
+        `POST /issues`.
+      enum: [SHARE_DETAILS, CONCEALED]
+
+    ContactChannelType:
+      type: string
+      description: |
+        Delivery medium for a concealed reporter's contact channel. `EMAIL` is
+        the only one wired in P1, and it is wired in P1 precisely because a
+        concealed reporter has no account, so `IN_APP` cannot reach them.
+      enum: [EMAIL]
+
+    ReporterContact:
+      type: object
+      description: |
+        A contact address the reporter supplies **in order to be told what
+        happens** to their report. Required when `disclosure` is `CONCEALED` and
+        rejected otherwise.
+
+        It is never the same thing as sharing identity. A `SHARE_DETAILS`
+        reporter's details are shown to staff; this value is shown to nobody at
+        CivicLens, and the operational database never sees it - see
+        `contact_channel` in SPEC.md's data model, a separate store with its own
+        credentials. Concealment is the reason this exists, so adding a
+        "convenience" field here that staff can read would defeat it.
+
+        Verified before the report enters any queue. Until the reporter proves
+        they own the address, the report is held out of triage: otherwise the
+        channel is a way to make strangers receive mail about a pothole they
+        never reported.
+      required: [type, value]
+      properties:
+        type:
+          $ref: '#/components/schemas/ContactChannelType'
+        value:
+          type: string
+          maxLength: 254
+          description: |
+            The address itself. Normalised server-side (case-folded, trimmed)
+            before any comparison. Never echoed back in any response body,
+            including to the reporter - a response that returns the address is a
+            response that will end up in a log.
+          example: meera.nair@example.org
+
+    ContactState:
+      type: string
+      description: |
+        Where a concealed report's contact channel has got to. Lives on the
+        operational issue row as a routing fact, not as PII: it is the only
+        trace of the channel that the operational database is allowed to hold.
+
+        `PENDING_VERIFICATION` — submitted, awaiting proof of channel
+        ownership, and **held out of every triage, assignment and SLA queue**.
+        `VERIFIED` — proven, and now receiving notifications. `UNDELIVERABLE` —
+        delivery to the channel failed permanently. This state must never lead
+        to an automatic close; it escalates to the manager instead, because a
+        dead address is a delivery failure and not a decision by the reporter.
+      enum: [PENDING_VERIFICATION, VERIFIED, UNDELIVERABLE]
+
+    ContactDecisionRequest:
+      type: object
+      description: |
+        The reporter's answer to an officer's proposed resolution, submitted
+        from the emailed link so it works from any device with no account and
+        no tracking token.
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [APPROVE, DISPUTE]
+        reason:
+          type: string
+          maxLength: 1000
+          description: Required when `decision` is `DISPUTE`, and ignored otherwise. A dispute without a reason leaves the officer nothing to act on.
 
     SlaState:
       type: string
@@ -2214,7 +2494,21 @@ components:
         title: { type: string, minLength: 5, maxLength: 200 }
         description: { type: string, minLength: 10, maxLength: 5000 }
         disclosure:
-          $ref: '#/components/schemas/Disclosure'
+          allOf: [{ $ref: '#/components/schemas/Disclosure' }]
+          description: |
+            Required, with no default. The client must render both options at
+            equal weight and refuse to submit until one is chosen.
+        reporterContact:
+          $ref: '#/components/schemas/ReporterContact'
+        contactDisclosureNote:
+          type: string
+          enum: ['1']
+          description: |
+            Required when `disclosure` is `CONCEALED`, and rejected otherwise.
+            A constant, invisible marker whose only job is to make the consent
+            explicit on the wire: a concealed report is asking the platform to
+            hold an address on the reporter's behalf, and the record of that
+            request should outlive the UI copy it was given under.
         categoryId: { type: [string, 'null'], format: uuid }
         subcategoryId: { type: [string, 'null'], format: uuid }
         proposedCategoryText:
@@ -2262,16 +2556,24 @@ components:
       description: |
         What the client needs immediately after submitting, and the last chance
         to capture the tracking token. `trackingToken` is returned exactly once
-        in the life of an anonymous report and is not recoverable from stored
+        in the life of a concealed report and is not recoverable from stored
         data, so the client must persist it before navigating away or the
         citizen loses access to the report they just filed.
       required: [issue, publicShareUrl]
       properties:
         issue: { $ref: '#/components/schemas/IssueDetail' }
+        contactVerificationRequired:
+          type: boolean
+          description: |
+            True only for a concealed submission, and the reason the client must
+            not navigate to a status page that will never resolve. The report is
+            `PENDING_VERIFICATION` and out of every queue until the reporter
+            proves they own the address, so the 201 response has to say so at
+            the moment the reporter is still on the page to act on it.
         trackingToken:
           type: [string, 'null']
           description: |
-            Present only for an anonymous submission. Absent (null) for a
+            Present only for a concealed submission. Absent (null) for a
             signed-in citizen, whose access comes from their session instead.
             32 bytes of HMAC output, base64url, prefixed `trk_` — unguessable by
             construction, and persisted server-side only as a hash. Reproduced
@@ -2306,6 +2608,18 @@ components:
         assignedDepartmentName: { type: [string, 'null'] }
         disclosure:
           $ref: '#/components/schemas/Disclosure'
+        contactState:
+          $ref: '#/components/schemas/ContactState'
+        approvalDeadline:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            When the reporter's chance to approve or dispute a proposed fix
+            closes - set when an officer resolves, and equal to `resolvedAt` plus
+            `REOPEN_WINDOW_DAYS`. Null until there is something to approve.
+
+            Surfaced to the reporter as a real date, because a right that expires
+            without ever being announced is not a right.
         proposedCategoryText:
           type: [string, 'null']
           maxLength: 100
@@ -2364,9 +2678,9 @@ components:
           type: [string, 'null']
           format: uuid
           description: |
-            Null for an anonymous report, and null for callers who may see the
+            Null for a concealed report, and null for callers who may see the
             issue but not the reporter — e.g. a manager reviewing a citizen's
-            report. Anonymous is stored as a null reporter, not as a sentinel
+            report. Concealed is stored as a null reporter, not as a sentinel
             user, so no join or query can accidentally treat it as a real
             account.
         reporterDisplayName:
@@ -2374,7 +2688,7 @@ components:
           description: |
             Only populated for the reporter themselves and for staff who need to
             contact them about this specific issue. Never returned publicly.
-            Null when `disclosure` is ANONYMOUS, even for staff — the reporter
+            Null when `disclosure` is CONCEALED, even for staff — the reporter
             asked not to be identified, and no internal role is a reason to
             override that.
         assignedDepartmentId: { type: [string, 'null'], format: uuid }
@@ -2383,7 +2697,7 @@ components:
         assignedOfficerName:
           type: [string, 'null']
           description: |
-            Deliberately visible to the reporter, anonymous or not. A citizen is
+            Deliberately visible to the reporter, concealed or not. A citizen is
             entitled to know which officer is handling their report, and it is
             the single most trust-building field on the screen. Staff internal
             notes stay internal; a name is not a note.
@@ -2409,6 +2723,14 @@ components:
           items: { $ref: '#/components/schemas/StatusHistoryEntry' }
         sla: { $ref: '#/components/schemas/SlaTracking' }
         resolutionReport: { $ref: '#/components/schemas/ResolutionReport' }
+        contactState:
+          $ref: '#/components/schemas/ContactState'
+        approvalDeadline:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            When the reporter's approval or dispute window closes: `resolvedAt`
+            plus `REOPEN_WINDOW_DAYS`. Null until a fix has been proposed.
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
         resolvedAt: { type: [string, 'null'], format: date-time }
@@ -2426,7 +2748,7 @@ components:
     TrackedIssueDetail:
       type: object
       description: |
-        The anonymous reporter's view of their own issue. An explicit field
+        The concealed reporter's view of their own issue. An explicit field
         allowlist, not `IssueDetail` with reporter fields nulled — the
         distinction is the whole point, because "nulled today" leaks the moment
         someone adds a field.
@@ -2463,6 +2785,12 @@ components:
         areaLabel: { type: [string, 'null'] }
         assignedDepartmentName: { type: [string, 'null'] }
         assignedOfficerName: { type: [string, 'null'] }
+        contactState:
+          $ref: '#/components/schemas/ContactState'
+        approvalDeadline:
+          type: [string, 'null']
+          format: date-time
+          description: Null until an officer proposes a fix. This is the reporter's own deadline and is shown to them as a date.
         confirmationCount: { type: integer }
         photoCount: { type: integer }
         statusHistory:
@@ -2582,10 +2910,10 @@ components:
         authorId:
           type: [string, 'null']
           format: uuid
-          description: Null for an anonymous reporter's comment. Attributable to the tracking token instead, which is never exposed.
+          description: Null for a concealed reporter's comment. Attributable to the tracking token instead, which is never exposed.
         authorName: { type: string }
         authorRole: { $ref: '#/components/schemas/Role' }
-        authorAnonymous: { type: boolean }
+        concealedAuthor: { type: boolean }
         createdAt: { type: string, format: date-time }
         editedAt: { type: [string, 'null'], format: date-time }
         revisionCount: { type: integer }
@@ -2691,7 +3019,7 @@ components:
           type: boolean
           description: |
             True when `title` has been replaced with the category name because
-            the reporter chose `disclosure: ANONYMOUS`. Sent so the page can say
+            the reporter chose `disclosure: CONCEALED`. Sent so the page can say
             so, instead of presenting a substituted title as though it were
             what the citizen wrote.
         categoryName: { type: [string, 'null'] }
@@ -2719,15 +3047,30 @@ components:
 
         - **No event per confirmation.** A citizen confirming a fix, or twenty
           citizens confirming the same fix, is one thing worth telling the
-          reporter once — and the reporter sees the live `confirmationCount` on
+          reporter once - and the reporter sees the live `confirmationCount` on
           their own issue instead. A notification per confirmation trains people
           to ignore the channel that matters.
-        - **Nothing for an anonymous report.** There is no account to deliver
-          to, and inventing one would undo the anonymity. An anonymous reporter
-          reads status from `/tracked/**` on demand.
+        - **No address, ever.** This row records that a message was produced and
+          to which channel. The recipient's address lives in the contact store
+          and is read at dispatch time by the notification service, the one
+          component with a legitimate reason to hold both. Putting the address
+          here would copy PII into the operational database, which is the exact
+          thing the separate contact store exists to prevent.
 
-        Anonymous reports are therefore not a notification special case in the
-        dispatch code; they simply never enqueue.
+        ## A concealed reporter is notified, and that is the point
+
+        Concealment hides the reporter from **staff**. It does not mean the
+        platform is silent. A concealed reporter gave a contact channel
+        precisely so it could reach them, and the approval gate does not work
+        without telling them a fix is waiting: a report that waits for an answer
+        nobody was told about is not approval-gated, it is just stuck.
+
+        So concealed reporters get `EMAIL`, through an outbox worker that reads
+        the contact store separately. `EMAIL` is therefore wired in P1 rather
+        than P5 - and only `EMAIL` is wired in P1, so a dead channel produces a
+        recorded `UNDELIVERABLE` state and a manager escalation rather than a
+        silent no-op. `ContactState` is a routing fact; the address behind it
+        never is.
       properties:
         id: { type: string, format: uuid }
         type:
@@ -2739,7 +3082,11 @@ components:
         channel:
           type: string
           enum: [IN_APP, EMAIL, PUSH]
-          description: First-class from day one so push needs no migration later. Only IN_APP is wired until P5.
+          description: |
+            First-class from day one so push needs no migration later. `IN_APP`
+            for signed-in recipients, `EMAIL` for a concealed reporter who has
+            no account - wired in P1, not P5, because the approval gate depends
+            on it. `PUSH` remains unwired.
         title: { type: string }
         body: { type: string }
         payload:
@@ -2903,10 +3250,10 @@ components:
         ipAddress:
           type: [string, 'null']
           description: |
-            Null for every action taken on an anonymous report. A reporter's IP
+            Null for every action taken on a concealed report. A reporter's IP
             is the only identity such a report has, so storing it in an
-            admin-readable table would leave the anonymity one records request
-            away. For anonymous traffic a salted, rotating hash is kept in the
+            admin-readable table would leave the concealment one records request
+            away. For concealed traffic a salted, rotating hash is kept in the
             abuse-detection store for the abuse window and nowhere else.
         createdAt: { type: string, format: date-time }
 

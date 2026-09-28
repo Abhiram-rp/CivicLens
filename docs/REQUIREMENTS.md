@@ -136,15 +136,23 @@
 - [ ] Public DTOs asserted PII-free by serializing them in a test
 - [ ] `public_code` is never accepted as a credential anywhere
 - [ ] Tracking tokens are derived from a nonce and persisted hashed only; **no table holds a token in plaintext**, idempotency store included — asserted by scanning every column, not by reading the create path
-- [ ] A replayed `Idempotency-Key` on an anonymous submit returns the original `trackingToken`, re-derived from `creation_nonce`, and does so *after* the idempotency TTL has elapsed — the case a retained-token design silently fails
-- [ ] `audit_logs.ip_address` is null for every action on an anonymous issue; the reporter's IP appears in no admin-readable table
-- [ ] `TrackedIssueDetail` and `PublicIssue` are asserted field-for-field; the public title of an anonymous report is redacted with `titleRedacted`
+- [ ] A replayed `Idempotency-Key` on a concealed submit returns the original `trackingToken`, re-derived from `creation_nonce`, and does so *after* the idempotency TTL has elapsed — the case a retained-token design silently fails
+- [ ] `audit_logs.ip_address` is null for every action on a concealed issue; the reporter's IP appears in no admin-readable table
+- [ ] `TrackedIssueDetail` and `PublicIssue` are asserted field-for-field; the public title of a concealed report is redacted with `titleRedacted`
+- [ ] **No reporter address exists anywhere in the operational database.** A reporter email submitted to `POST /issues` is asserted absent from: every column of the issue store, `IssueDetail`, `TrackedIssueDetail`, `PublicIssue`, the CSV export, `audit_logs`, `notification_outbox`, and captured log lines. `contact_channels` is a **separate database with separate credentials**, and a test asserts the reporting service's datasource has no grant on it
+- [ ] `contact_channels.encrypted_value` is `BYTEA` and unreadable as text; a key-rotation test re-wraps without a migration over live addresses (`CONTACT_ENCRYPTION_KEY_ID`)
+- [ ] `reporterContact` + `contactDisclosureNote` are required exactly when `disclosure` is `CONCEALED` and rejected otherwise — the same cross-field limitation as `proposedCategoryText`, asserted directly in a validation test
+- [ ] **An unverified concealed report is queued nowhere.** Submit concealed, leave the channel unverified, and assert absence from every triage, assignment and SLA query, with `contact_state = PENDING_VERIFICATION`
+- [ ] Contact tokens are single-use, hashed, TTL'd and brute-force throttled: a replayed `verificationToken` or `decisionToken` is 410; no `contact_tokens` column stores plaintext; `POST /contact/verify` returns **204 with an empty body** and never echoes the address
+- [ ] **`POST /tracked/issues/{id}/reveal` cannot deconceal on a leaked token** — `disclosure` stays `CONCEALED` until the new address is verified, and the contract contains no inverse operation
+- [ ] A **permanent delivery failure cannot close or advance a report**: force a bounce, assert the issue is still `RESOLVED`, `contact_state = UNDELIVERABLE`, and it is visible in the manager's undeliverable-approval queue
+- [ ] The approval gate is **identical for concealed and signed-in reporters** — the same test body runs against `/contact/decision` and `/issues/{id}/confirm`, asserting the same resulting status and the same audit row
 - [ ] `/tracked/**` comment listing returns no `INTERNAL` row (asserted in a test)
 - [ ] `POST /issues` with a valid non-CITIZEN token is 403; a staff account cannot file a report attributed to itself as a citizen
 - [ ] `proposedCategoryText` is required exactly when `categoryId` is `OTHER` and rejected otherwise — a cross-field rule OpenAPI cannot express, so it is asserted directly in a validation test
-- [ ] Nothing but the reporter's own confirmation moves an issue to `CLOSED` — asserted exhaustively over every scheduled/job path
+- [ ] Nothing but the reporter's own approval moves an issue to `CLOSED` — asserted exhaustively over every scheduled/job path **and** over every delivery-failure path
 - [ ] Comment edit and delete append revisions and audit rows; neither overwrites in place; editing invalidates a cached `ai_summary`
-- [ ] `@PreAuthorize` on every operation with a non-empty `x-required-roles`, asserted against the contract; the service-layer exception for `POST /issues` and `/tracked/**` is documented, not accidental
+- [ ] `@PreAuthorize` on every operation with a non-empty `x-required-roles`, asserted against the contract; the service-layer exception for `POST /issues`, `/tracked/**` and `/contact/**` is documented, not accidental
 
 ---
 
@@ -173,17 +181,23 @@
 - **Closure invariant: an exhaustive test asserting no job, timer or SYSTEM path can write `CLOSED` — only the reporter's own confirmation can**
 - Authorization/IDOR: citizen cannot read or modify another citizen's data; citizen cannot call staff endpoints; department scoping
 - **Tracking-token scoping: a valid token reaches only the issues created with it; a `public_code` presented as a credential is rejected; an unknown token is 404, not 401**
-- **Token derivation: create anonymous → replay the same `Idempotency-Key` after the TTL window has passed → the same `trackingToken` comes back, and no column in the database holds it in plaintext at any point**
-- **Anonymity: `audit_logs.ip_address` null on anonymous issues; reporter fields structurally absent from `TrackedIssueDetail` and `PublicIssue`; no `INTERNAL` comment on `/tracked/**`**
+- **Token derivation: create concealed → replay the same `Idempotency-Key` after the TTL window has passed → the same `trackingToken` comes back, and no column in the database holds it in plaintext at any point**
+- **Concealment: `audit_logs.ip_address` null on concealed issues; reporter fields structurally absent from `TrackedIssueDetail` and `PublicIssue`; no `INTERNAL` comment on `/tracked/**`**
+- **Contact isolation: the reporter's address exists only in the separate `contact_channels` database; the operational store has no column, JSONB path or grant that can reach it. Asserted by reading the value back through a connection using the *reporting service's* credentials and finding nothing**
+- **Verification gate: an unverified concealed report is absent from every queue query, and `contact_state` reads `PENDING_VERIFICATION`**
+- **Reveal: a leaked tracking token leaves `disclosure` at `CONCEALED`; the reveal takes effect only after the new address is verified; the contract has no inverse operation**
+- **Delivery failure: a permanent bounce leaves the issue `RESOLVED` with `contact_state = UNDELIVERABLE`, in the manager queue, and never `CLOSED`**
+- **Approval gate parity: the same assertion body passes against `/contact/decision` and `/issues/{id}/confirm` — same resulting status, same audit row**
+- **Contact token hygiene: a replayed `verificationToken`/`decisionToken` is 410, and `POST /contact/verify` returns a body-less 204 that never echoes the address**
 - Comment window: edit after the window is 422; an edit writes a revision row; the body is never overwritten in place
 - Upload validation: wrong type, oversize, spoofed extension, path traversal attempt
 - Priority engine: band boundaries exact at 80/55/30, monotonic in age, category ordering
 - Auth: refresh rotation, reuse detection, revocation
 - **Rate limiting: budget headers present on a success; 429 carries `Retry-After`; a Redis outage serves the request rather than rejecting it**
 
-**Tier 2 — integration:** Testcontainers (Postgres+pgvector, RabbitMQ, MinIO) for the full create → AI → triage flow, outbox idempotency, SLA boundaries, and the anonymous create → track → confirm path.
+**Tier 2 — integration:** Testcontainers (Postgres+pgvector, RabbitMQ, MinIO) for the full create → AI → triage flow, outbox idempotency, SLA boundaries, and **two** concealed flows: create → verify → track → approve, and create → verify → email bounce → `UNDELIVERABLE` → still `RESOLVED`.
 
-**Tier 3 — E2E (minimum one):** citizen creates → AI analysis completes → manager assigns → officer resolves → citizen confirms → closed. Plus a second E2E: **a visitor with no account reports anonymously, receives a tracking token, follows the status, comments, confirms, and cannot reach any other issue with that token.**
+**Tier 3 — E2E (minimum one):** citizen creates → AI analysis completes → manager assigns → officer resolves → **the officer's resolve does not close it** → citizen confirms → closed. Plus a second E2E: **a visitor with no account submits with their identity concealed, verifies the contact channel, receives the proposed fix by email, disputes it from the link, and cannot reach any other issue with that token.**
 
 **Frontend:** interceptor refresh logic, report form validation, one critical workflow test.
 
@@ -246,7 +260,7 @@ Split fast unit tests from slower Testcontainers jobs to keep feedback tight.
 
 1. **AI API key** — not required to build or demo; drop one into `.env` when available
 2. **Production host and domain** — not required until a deploy target exists
-3. **Email provider** (P2) — Resend vs SES
+3. **Email provider** — **Resend vs SES, and this is now P1, not P2**: the concealed approval gate needs a transactional sender. Pick by deliverability to the target community's dominant inbox; everything else about the two is equivalent here. A local dev override (`SMTP_*` to Mailpit) is required so the flow is testable offline
 4. **Embedding provider** (P3) — Voyage AI vs self-hosted, decided at the P3 migration
 5. **Target scale** — confirm the real launch community size so indexes, page sizes and rate limits are sized for it
 6. **Unit test runner** — confirm what Angular 22 scaffolds with, then pin it here

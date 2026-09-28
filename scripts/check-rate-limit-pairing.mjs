@@ -133,9 +133,16 @@ for (const op of ops) {
 function governs(op) {
   if (op.id.startsWith('listTracked') || op.id.startsWith('getTracked') ||
       op.id.startsWith('updateTracked') || op.id.startsWith('addTracked') ||
-      op.id.startsWith('confirmTracked') || op.id.startsWith('reopenTracked')) {
+      op.id.startsWith('confirmTracked') || op.id.startsWith('reopenTracked') ||
+      op.id.startsWith('revealTracked')) {
     return '/tracked/**';
   }
+  // The contact surface is split into two SPEC rows rather than one
+  // `/contact/**` wildcard, because the two limits differ: a verification
+  // token proves nothing until it succeeds, so it is the more brute-forceable
+  // of the two, and a decision is worth throttling harder than a read.
+  if (op.id === 'verifyContact') return 'POST /contact/verify';
+  if (op.id === 'submitContactDecision') return 'POST /contact/decision';
   if (op.id === 'createIssue') return 'POST /issues';
   if (op.id === 'addComment') return 'POST /issues/{id}/comments';
   if (op.id === 'login') return 'POST /auth/login';
