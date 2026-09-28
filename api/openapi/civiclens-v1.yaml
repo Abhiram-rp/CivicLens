@@ -997,14 +997,31 @@ paths:
         reports from a shared kiosk or a family phone accumulates several
         reports under one token, so this is a list and not a single resource.
 
-        Status is read live. There are no in-app notifications for a concealed
-        report — a notification needs an account to deliver to — so this
-        endpoint is how a concealed reporter finds out what happened.
+        Status is read live. A concealed reporter is emailed about the things
+        that matter - most importantly a fix waiting for their approval - but
+        they have no inbox inside CivicLens, so this endpoint remains the
+        authoritative view of everything that has happened to their reports,
+        including anything the email did not say.
       operationId: listTrackedIssues
       x-required-roles: []
       security: []
       parameters:
         - $ref: '#/components/parameters/TrackingTokenHeader'
+        - name: status
+          in: query
+          required: false
+          description: |
+            Narrows to reports in one status, and `AWAITING_APPROVAL` selects
+            the ones with a fix proposed and no answer yet. Provided because a
+            reporter on a shared device with nine reports under one token needs
+            to answer "is anything waiting for me", and paging newest-first
+            makes that the only answer they can get.
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/IssueStatus'
+              - type: string
+                enum: [AWAITING_APPROVAL]
+          example: AWAITING_APPROVAL
         - $ref: '#/components/parameters/PageParam'
         - $ref: '#/components/parameters/SizeParam'
       responses:
@@ -2061,7 +2078,8 @@ components:
       description: |
         The coarse bucket name that answered - `auth-login`, `auth-register`,
         `issue-create`, `issue-comment`, `tracked-read`, `tracked-comment`,
-        `tracked-write`, `public-read`, `ai-analysis` - and **nothing else**.
+        `tracked-write`, `contact-verify`, `contact-decision`, `public-read`,
+        `ai-analysis` - and **nothing else**.
 
         The identity segment of the Redis key (user id, or salted IP hash for
         concealed buckets) is deliberately omitted, and is what SPEC.md 7.5 sends
@@ -2091,6 +2109,13 @@ components:
           - tracked-read
           - tracked-comment
           - tracked-write
+          # Separate from the tracked buckets on purpose. `/contact/**` is
+          # authorised by a single-use token rather than a tracking token, has a
+          # different limit, and is reachable by a reporter who has lost their
+          # tracking token entirely. Filing them under `tracked-write` would make
+          # both the operator metrics and the client's greyed-out button wrong.
+          - contact-verify
+          - contact-decision
           - public-read
           - ai-analysis
     RetryAfter:

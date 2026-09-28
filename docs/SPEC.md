@@ -236,7 +236,7 @@ All eight operations require the `X-Tracking-Token` header and carry `x-required
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/tracked/issues` | Every report created with this token. A shared kiosk accumulates several, so it is a list. **401** if the header is absent, **404** if unrecognised — one "link not valid" state instead of two |
+| GET | `/tracked/issues` | Every report created with this token, `?status=` narrows to one status or to `AWAITING_APPROVAL` (a fix proposed, no answer yet). A shared kiosk accumulates several, so it is a list. **401** if the header is absent, **404** if unrecognised — one "link not valid" state instead of two |
 | GET | `/tracked/issues/{id}` | `TrackedIssueDetail`: an explicit allowlist. No `reporterId`, no `reporterDisplayName`, no `address`, coordinates rounded to ~100 m, no `aiSuggestions`, no internal notes. `assignedOfficerName` **is** included |
 | PUT | `/tracked/issues/{id}` | Edit while `SUBMITTED`/`AI_ANALYZING`, same rules as the signed-in path |
 | GET | `/tracked/issues/{id}/comments` | `INTERNAL` filtered out server-side; a test asserts no `INTERNAL` row is ever returned |
