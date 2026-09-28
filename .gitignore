@@ -1,0 +1,54 @@
+# ---- Secrets: never commit (spec §18, gitleaks in CI) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+
+# ---- Java / Maven ----
+target/
+*.class
+*.jar
+*.war
+!**/mvnw
+!**/mvnw.cmd
+.mvn/wrapper/maven-wrapper.jar
+hs_err_pid*
+replay_pid*
+*.log
+
+# ---- Node / Angular ----
+node_modules/
+dist/
+.angular/
+out-tsc/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- IDE ----
+.idea/
+*.iml
+*.iws
+*.imz
+.vscode/*
+!.vscode/extensions.json
+.classpath
+.project
+.settings/
+
+# ---- OS ----
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# ---- Local runtime data: uploads, MinIO/Postgres/Redis volumes ----
+uploads/
+docker-data/
+/data/
+/tmp/
+
+# ---- Agent / session workspace state (not project data) ----
+.opencode/

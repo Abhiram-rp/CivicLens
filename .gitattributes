@@ -1,0 +1,28 @@
+# Normalize line endings: repo stores LF, Windows checkouts get CRLF.
+# Matters because CI and Docker run on Linux, where a CRLF in a .sh or
+# compose file fails in a confusing way.
+* text=auto eol=lf
+
+*.java   text eol=lf
+*.ts     text eol=lf
+*.html   text eol=lf
+*.css    text eol=lf
+*.scss   text eol=lf
+*.json   text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.md     text eol=lf
+*.sql    text eol=lf
+*.xml    text eol=lf
+*.sh     text eol=lf
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.pdf    binary
+*.zip    binary
+*.jar    binary
