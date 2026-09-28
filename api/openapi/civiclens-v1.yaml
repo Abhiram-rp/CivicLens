@@ -128,6 +128,11 @@ paths:
       responses:
         '201':
           description: Registered. The account starts ACTIVE.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/RegisteredUser' }
@@ -175,6 +180,10 @@ paths:
             Set-Cookie:
               description: 'WEB only: HttpOnly; SameSite=Strict; Path=/api/v1/auth'
               schema: { type: string }
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/LoginResponse' }
@@ -185,6 +194,16 @@ paths:
             Rate limited. Two independent limits apply: 5 per minute per IP and
             10 per hour per account. A generic message is returned in both
             cases so the response does not reveal whether an account exists.
+            Carries `Retry-After` and the `X-RateLimit-*` budget headers like
+            every other limited response — login is the endpoint where a human
+            is most likely to hit a limit, so it is the one response that must
+            not omit them.
+          headers:
+            Retry-After: { $ref: '#/components/headers/RetryAfter' }
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorEnvelope' }
@@ -255,6 +274,13 @@ paths:
         detection and idempotency are identical, and two copies of them would
         drift.
 
+        Because `x-required-roles` is empty here, the CITIZEN check cannot live
+        in `@PreAuthorize` and is a **service-layer** rule: a valid token
+        belonging to a `FIELD_OFFICER`, `DEPARTMENT_MANAGER` or `ADMIN` is
+        rejected with 403. Staff file reports through staff channels, and
+        letting a staff account file a "citizen" report would attribute it to a
+        staff user and pull it into that user's citizen-scope queries.
+
         A present-but-invalid `Authorization` header is a 401. A missing one is
         never an error here — that is the anonymous path, and answering 401
         would make reporting without an account impossible.
@@ -273,12 +299,19 @@ paths:
         `publicCode` is a dense sequential range starting at `CIV-100001` and is
         therefore enumerable, so it is a share handle and **never** a
         credential. An anonymous report is instead tracked by a separate
-        unguessable token returned exactly once here. It is stored only as a
-        hash, is scoped to the issues created with it, and is presented in the
-        `X-Tracking-Token` header on `/tracked/**`. No endpoint can recover or
-        re-issue it, so a citizen who loses it loses access to the anonymous
-        report. That is the intended trade for anonymity, and it is why the
-        response tells the client to store the token before anything else.
+        unguessable token returned exactly once here. It is *derived* from a
+        stored nonce under a server-side pepper, is persisted only as a hash,
+        is scoped to the issues created with it, and is presented in the
+        `X-Tracking-Token` header on `/tracked/**`.
+
+        The token is not recoverable from stored data: producing it requires
+        the pepper, which never leaves the server. The one path that re-emits a
+        token is an idempotent replay, and that requires the original
+        `Idempotency-Key` presented by the same reporter identity — a control
+        the client already holds, and one scoped no more widely than the token
+        itself. A citizen who loses both loses access to the anonymous report.
+        That is the intended trade for anonymity, and it is why the response
+        tells the client to store the token before anything else.
 
         The token travels in a header rather than the query string so it stays
         out of access logs and `Referer` headers.
@@ -288,10 +321,19 @@ paths:
         `Idempotency-Key` is required. A citizen on throttled 3G who
         double-taps or retries must not create two reports. On a repeat of the
         same key by the same reporter, this endpoint returns the ORIGINAL 201
-        body with 201 — not an error. The idempotency record retains the
-        plaintext token for the idempotency TTL so that a replay returns the
-        *same* token; after that TTL it is unrecoverable and a late retry
-        produces a fresh report rather than a broken one.
+        body with 201 — not an error.
+
+        A replay must return the *same* `trackingToken`, because the citizen who
+        never received the first response is precisely the citizen this feature
+        exists for. That is achieved by **deriving** the token rather than
+        retaining it: the service stores a 32-byte `creation_nonce` alongside
+        the token hash and recomputes
+        `base64url(HMAC-SHA256(TRACKING_TOKEN_PEPPER, "trk" || nonce || issueId))`
+        on every replay. A nonce is not a secret and cannot be turned back into
+        the token without the pepper, so nothing recoverable is ever written to
+        disk. Unlike a retained plaintext token this does not expire with the
+        idempotency TTL, so a retry that arrives late still gets the original
+        token instead of silently orphaning the report.
 
         ## Rate limit
 
@@ -398,11 +440,6 @@ paths:
       responses:
         '200':
           description: A page of issue summaries
-          headers:
-            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
-            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
-            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
-            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/IssueSummaryPage' }
@@ -974,6 +1011,11 @@ paths:
       responses:
         '200':
           description: The issue
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TrackedIssueDetail' }
@@ -998,6 +1040,11 @@ paths:
       responses:
         '200':
           description: Updated
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TrackedIssueDetail' }
@@ -1008,6 +1055,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /tracked/issues/{issueId}/comments:
     parameters:
@@ -1027,12 +1075,18 @@ paths:
       responses:
         '200':
           description: Public comments, oldest first
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
           content:
             application/json:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/Comment' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
     post:
       tags: [tracked]
       summary: Comment on my anonymous report
@@ -1051,6 +1105,11 @@ paths:
       responses:
         '201':
           description: Created
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Comment' }
@@ -1075,11 +1134,17 @@ paths:
       responses:
         '200':
           description: Closed
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TrackedIssueDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   /tracked/issues/{issueId}/reopen:
     parameters:
@@ -1110,6 +1175,11 @@ paths:
       responses:
         '200':
           description: Reopened
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TrackedIssueDetail' }
@@ -1121,6 +1191,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429': { $ref: '#/components/responses/RateLimited' }
 
   # ===========================================================================
   # PUBLIC
@@ -1762,6 +1833,13 @@ components:
     # client can grey out a button and an operator can see pressure building.
     # Instagram's actual numbers are proprietary and unpublished; the mechanism
     # is not, and it is the mechanism that changes client behaviour.
+    #
+    # INVARIANT: these headers appear on an operation if and only if SPEC.md 7.5
+    # gives that operation a rate. The pairing is checked in both directions -
+    # no headers without a limit, and no limit without headers - because the two
+    # sides drifted once already in this very file. A 429 inlined by hand instead
+    # of $ref'ing `RateLimited` is how the login response lost its
+    # `Retry-After`; reference the component instead of restating it.
     RateLimitLimit:
       description: Requests permitted in the current window for this bucket.
       schema: { type: integer }
@@ -1778,6 +1856,9 @@ components:
         is a salted hash for IP-keyed buckets, never a raw address, so a client
         log or a support screenshot cannot deanonymize a reporter.
       schema: { type: string }
+    RetryAfter:
+      description: Seconds to wait before retrying. Declared on **every** 429.
+      schema: { type: integer }
 
   parameters:
     IssueIdPath:
@@ -1804,6 +1885,10 @@ components:
         The unguessable token issued in the 201 body of an anonymous report,
         stored client-side. It authorises access to exactly the issues created
         with it and nothing else.
+
+        The server holds no plaintext copy of any token it issued, so a
+        presented token is verified by hashing it under the pepper and
+        comparing digests in constant time.
 
         A header rather than a query parameter so the value stays out of access
         logs, proxy logs and `Referer` headers.
@@ -1843,6 +1928,13 @@ components:
         hash when anonymous, so one anonymous reporter retrying cannot collide
         with an unrelated anonymous reporter who happened to generate the same
         UUID.
+
+        A replay returns the original body *including* the original
+        `trackingToken`, which the server re-derives rather than retains. Reuse
+        of a key with a materially different payload is a client bug: the
+        original report is returned unchanged, the mismatch is logged, and no
+        second report is created — so the bug is visible rather than silently
+        dropping a citizen's report.
       schema: { type: string, format: uuid, maxLength: 100 }
 
   responses:
@@ -1874,9 +1966,7 @@ components:
     RateLimited:
       description: Rate limit exceeded
       headers:
-        Retry-After:
-          description: Seconds to wait before retrying.
-          schema: { type: integer }
+        Retry-After: { $ref: '#/components/headers/RetryAfter' }
         X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
         X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
         X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
@@ -2143,9 +2233,9 @@ components:
       description: |
         What the client needs immediately after submitting, and the last chance
         to capture the tracking token. `trackingToken` is returned exactly once
-        in the life of an anonymous report and cannot be recovered afterwards,
-        so the client must persist it before navigating away or the citizen
-        loses access to the report they just filed.
+        in the life of an anonymous report and is not recoverable from stored
+        data, so the client must persist it before navigating away or the
+        citizen loses access to the report they just filed.
       required: [issue, publicShareUrl]
       properties:
         issue: { $ref: '#/components/schemas/IssueDetail' }
@@ -2154,8 +2244,10 @@ components:
           description: |
             Present only for an anonymous submission. Absent (null) for a
             signed-in citizen, whose access comes from their session instead.
-            32 random bytes, base64url, prefixed `trk_` — unguessable by
-            construction, and stored server-side only as a hash.
+            32 bytes of HMAC output, base64url, prefixed `trk_` — unguessable by
+            construction, and persisted server-side only as a hash. Reproduced
+            on idempotent replay by re-deriving it from the stored nonce, so a
+            client is never asked to hold a token it may not yet have received.
         publicShareUrl:
           type: string
           description: |
@@ -2314,6 +2406,12 @@ components:
         exact `latitude`/`longitude`, `aiSuggestions` and every internal note.
         Present: the assigned officer's name, because the citizen asked for it
         and it is not private.
+
+        One asymmetry is deliberate: `INTERNAL` comments are filtered out of
+        this view, but `resolutionReport` is shown whole, notes included. That
+        matches the signed-in citizen view in `IssueDetail`, and the officer's
+        notes are written *to* the reporter rather than about them. The two
+        rules are different because the two things are different.
       required: [publicCode, title, status, createdAt]
       properties:
         id: { type: string, format: uuid }

@@ -105,7 +105,9 @@
 - Base path `/api/v1`; never break it, add `/api/v2`.
 - DTOs at the boundary; entities are never serialized.
 - Pagination on every list; default page size 20, max 100.
-- `Idempotency-Key` header on `POST /issues`; replay returns the original 201 body — including the original tracking token — not an error.
+- `Idempotency-Key` header on `POST /issues`; replay returns the original 201 body — including the original tracking token, re-derived rather than read back — not an error.
+- Tracking tokens are `HMAC-SHA256(TRACKING_TOKEN_PEPPER, "trk" || creation_nonce || issue_id)`. No column in any table, including the idempotency store, holds a token in plaintext.
+- `x-required-roles` is empty on `POST /issues`, so the CITIZEN check is a service-layer rule: a valid `FIELD_OFFICER`, `DEPARTMENT_MANAGER` or `ADMIN` token is 403, never a citizen report attributed to a staff account.
 - `multipart/form-data` for issue create and resolve.
 - Standard error envelope with `code`, `message`, `path`, `traceId`, optional `details[]`.
 - **404-not-403** for anything the caller cannot see; 403 only when the role could never use the endpoint.
@@ -125,17 +127,20 @@
 - [ ] CORS allow-list is the actual origin(s), never `*`
 - [ ] Uploads: magic-byte validation, ≤5 MB/file, ≤15 MB total, 3 photos, server-generated key, signed URL TTL ~5 min, EXIF GPS stripped
 - [ ] Rate limits on login, register, issue create, comments, public reads, `/tracked/**`, AI paths; rolling window per bucket; **fails open** on a Redis outage with a logged warning
-- [ ] Rate-limited responses carry `X-RateLimit-Limit` / `-Remaining` / `-Reset` / `-Bucket` on **success** as well as 429, and `Retry-After` on 429
+- [ ] Rate-limited responses carry `X-RateLimit-Limit` / `-Remaining` / `-Reset` / `-Bucket` on **success** as well as 429, and `Retry-After` on 429; `node scripts/check-rate-limit-pairing.mjs` exits 0
 - [ ] Rate-limit bucket identity is a user id or a **salted, rotating IP hash** — never a raw IP in a Redis key
 - [ ] Secrets 100% environment-sourced; `.env` gitignored; gitleaks in CI
 - [ ] Audit log captures status changes, assignments, role changes, SLA policy changes, user enable/disable, priority downgrades, comment edits/deletes
 - [ ] IDOR test per endpoint that reads or writes an owned resource
 - [ ] Public DTOs asserted PII-free by serializing them in a test
 - [ ] `public_code` is never accepted as a credential anywhere
-- [ ] Tracking tokens are stored hashed only, and no endpoint can recover or re-issue one
+- [ ] Tracking tokens are derived from a nonce and persisted hashed only; **no table holds a token in plaintext**, idempotency store included — asserted by scanning every column, not by reading the create path
+- [ ] A replayed `Idempotency-Key` on an anonymous submit returns the original `trackingToken`, re-derived from `creation_nonce`, and does so *after* the idempotency TTL has elapsed — the case a retained-token design silently fails
 - [ ] `audit_logs.ip_address` is null for every action on an anonymous issue; the reporter's IP appears in no admin-readable table
 - [ ] `TrackedIssueDetail` and `PublicIssue` are asserted field-for-field; the public title of an anonymous report is redacted with `titleRedacted`
 - [ ] `/tracked/**` comment listing returns no `INTERNAL` row (asserted in a test)
+- [ ] `POST /issues` with a valid non-CITIZEN token is 403; a staff account cannot file a report attributed to itself as a citizen
+- [ ] `proposedCategoryText` is required exactly when `categoryId` is `OTHER` and rejected otherwise — a cross-field rule OpenAPI cannot express, so it is asserted directly in a validation test
 - [ ] Nothing but the reporter's own confirmation moves an issue to `CLOSED` — asserted exhaustively over every scheduled/job path
 - [ ] Comment edit and delete append revisions and audit rows; neither overwrites in place; editing invalidates a cached `ai_summary`
 - [ ] `@PreAuthorize` on every operation with a non-empty `x-required-roles`, asserted against the contract; the service-layer exception for `POST /issues` and `/tracked/**` is documented, not accidental
@@ -167,6 +172,7 @@
 - **Closure invariant: an exhaustive test asserting no job, timer or SYSTEM path can write `CLOSED` — only the reporter's own confirmation can**
 - Authorization/IDOR: citizen cannot read or modify another citizen's data; citizen cannot call staff endpoints; department scoping
 - **Tracking-token scoping: a valid token reaches only the issues created with it; a `public_code` presented as a credential is rejected; an unknown token is 404, not 401**
+- **Token derivation: create anonymous → replay the same `Idempotency-Key` after the TTL window has passed → the same `trackingToken` comes back, and no column in the database holds it in plaintext at any point**
 - **Anonymity: `audit_logs.ip_address` null on anonymous issues; reporter fields structurally absent from `TrackedIssueDetail` and `PublicIssue`; no `INTERNAL` comment on `/tracked/**`**
 - Comment window: edit after the window is 422; an edit writes a revision row; the body is never overwritten in place
 - Upload validation: wrong type, oversize, spoofed extension, path traversal attempt
