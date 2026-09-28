@@ -295,7 +295,10 @@ This table is the single source of truth for *which* operations are limited, and
 
 Two rules that follow from anonymity:
 - **Bucket keys hold a salted, rotating IP hash, never a raw address.** A Redis dump or a support screenshot must not deanonymize a reporter, and rotation means the hash is useless for correlating a reporter across a long period.
-- **Which bucket was exhausted goes to metrics, never to the client.** A response that says "your IP is over the limit" is a small but free enumeration aid against a shared address.
+- **The identity segment goes to metrics, never to the client.** `X-RateLimit-Bucket` carries the coarse bucket *name* (`issue-create`, `tracked-read`, `public-read`, …) and stops there. The user id or IP hash that completes the Redis key is logged and metered, not returned.
+  - A truncated salted hash is not reversible, so it leaks no address — but it is a **stable correlation handle**. Emitting it lets anyone reading a client-side log group one anonymous reporter's requests together, and under a shared-address bucket it confirms that two strangers hit the same identity limit. That is the enumeration aid the rule exists to prevent, and the client gains nothing by knowing it: the limit, the remainder and the reset time are all it needs to grey out a button.
+
+  *This was previously contradicted by the contract, which returned `tracked-comment:iphash:41ab…` to the client. Fixed 2026-09-28.*
 
 **Fails open.** If Redis is unavailable the request is served and a warning logged. A cache outage must not reject every report in the city; bounded abuse during an outage is strictly better than total unavailability.
 

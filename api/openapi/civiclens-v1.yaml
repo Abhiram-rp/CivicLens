@@ -1851,11 +1851,40 @@ components:
       schema: { type: integer }
     RateLimitBucket:
       description: |
-        Which bucket answered, e.g. `issue-create:user:9f3c…` or
-        `tracked-comment:iphash:41ab…`. Diagnostic only — the identity portion
-        is a salted hash for IP-keyed buckets, never a raw address, so a client
-        log or a support screenshot cannot deanonymize a reporter.
-      schema: { type: string }
+        The coarse bucket name that answered - `auth-login`, `auth-register`,
+        `issue-create`, `issue-comment`, `tracked-read`, `tracked-comment`,
+        `tracked-write`, `public-read`, `ai-analysis` - and **nothing else**.
+
+        The identity segment of the Redis key (user id, or salted IP hash for
+        anonymous buckets) is deliberately omitted, and is what SPEC.md 7.5 sends
+        to metrics instead. A truncated salted hash is not reversible and so
+        does not deanonymize anyone, but it is a *stable correlation handle*:
+        emitting it lets a reader of any client-side log group one anonymous
+        reporter's requests together, and under a shared-address bucket it
+        confirms that two strangers were rate-limited by the same identity -
+        which is precisely the enumeration aid the "never to the client" rule
+        exists to prevent.
+
+        The client keeps everything the Meta mechanism actually needs: the limit,
+        what is left, and when the window rolls, so a button can be greyed out
+        before the citizen discovers the limit by hitting it. It never needs to
+        know *which* identity it was counted against.
+
+        Enumerated rather than left as a free string, so a client generator
+        produces a closed union and a stray hash cannot be added without
+        breaking the build.
+      schema:
+        type: string
+        enum:
+          - auth-login
+          - auth-register
+          - issue-create
+          - issue-comment
+          - tracked-read
+          - tracked-comment
+          - tracked-write
+          - public-read
+          - ai-analysis
     RetryAfter:
       description: Seconds to wait before retrying. Declared on **every** 429.
       schema: { type: integer }

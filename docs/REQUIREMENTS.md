@@ -128,7 +128,8 @@
 - [ ] Uploads: magic-byte validation, ≤5 MB/file, ≤15 MB total, 3 photos, server-generated key, signed URL TTL ~5 min, EXIF GPS stripped
 - [ ] Rate limits on login, register, issue create, comments, public reads, `/tracked/**`, AI paths; rolling window per bucket; **fails open** on a Redis outage with a logged warning
 - [ ] Rate-limited responses carry `X-RateLimit-Limit` / `-Remaining` / `-Reset` / `-Bucket` on **success** as well as 429, and `Retry-After` on 429; `node scripts/check-rate-limit-pairing.mjs` exits 0
-- [ ] Rate-limit bucket identity is a user id or a **salted, rotating IP hash** — never a raw IP in a Redis key
+- [ ] Rate-limit bucket identity is a user id or a **salted, rotating IP hash** - never a raw IP in a Redis key, and never in a response header: `X-RateLimit-Bucket` carries the coarse name only, asserted by a test that fails if a hash or user id appears in it
+- [ ] The full Redis key (name + identity) is present in logs and metrics, so support can still diagnose a limit the client is not told about
 - [ ] Secrets 100% environment-sourced; `.env` gitignored; gitleaks in CI
 - [ ] Audit log captures status changes, assignments, role changes, SLA policy changes, user enable/disable, priority downgrades, comment edits/deletes
 - [ ] IDOR test per endpoint that reads or writes an owned resource
