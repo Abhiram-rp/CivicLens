@@ -1,6 +1,5 @@
-import { inject } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
-import type { ApiRequestInterceptor, ApiResponseInterceptor } from '../api/interceptor-types';
+import type { ApiResponseInterceptor } from '../api/interceptor-types';
 import { AuthService } from './auth.service';
 
 /**
@@ -74,37 +73,41 @@ function isRefreshCandidate(request: Request): boolean {
  *
  * Returns the retried `Response` so the SDK's own success/error handling sees a
  * normal outcome and nothing downstream needs to know a retry happened.
+ *
+ * `auth` is a parameter because the generated client calls this with no
+ * injection context; `inject(AuthService)` here threw `NG0203` on the first 401
+ * in a real browser. See `auth.interceptor.ts` for the full account.
  */
-export const refreshInterceptor: ApiResponseInterceptor = async (response, request) => {
-  if (response.status !== 401 || !isRefreshCandidate(request)) {
-    return response;
-  }
+export function createRefreshInterceptor(auth: AuthService): ApiResponseInterceptor {
+  return async (response, request) => {
+    if (response.status !== 401 || !isRefreshCandidate(request)) {
+      return response;
+    }
 
-  const auth = inject(AuthService);
+    let accessToken: string;
+    try {
+      accessToken = await refreshOnce(auth);
+    } catch {
+      // The refresh itself was rejected: the cookie is gone, expired or revoked.
+      // Nothing further to try, and retrying would loop. The local session is
+      // dropped so the guard sends the citizen to sign in rather than leaving them
+      // on a page that will keep failing.
+      auth.clearSession();
+      return response;
+    }
 
-  let accessToken: string;
-  try {
-    accessToken = await refreshOnce(auth);
-  } catch {
-    // The refresh itself was rejected: the cookie is gone, expired or revoked.
-    // Nothing further to try, and retrying would loop. The local session is
-    // dropped so the guard sends the citizen to sign in rather than leaving them
-    // on a page that will keep failing.
-    auth.clearSession();
-    return response;
-  }
+    const replayed = new Request(request.url, {
+      method: request.method,
+      headers: new Headers(request.headers),
+      // A consumed body cannot be replayed, so a retried upload is reported
+      // honestly rather than sent with a truncated body.
+      body: request.bodyUsed ? null : request.body,
+      // `redirect` and `mode` are deliberately not copied: the SDK sets them, and
+      // a `Request` built without them defaults differently from the original.
+    });
+    replayed.headers.set('Authorization', `Bearer ${accessToken}`);
+    replayed.headers.set(RETRY_MARKER, '1');
 
-  const replayed = new Request(request.url, {
-    method: request.method,
-    headers: new Headers(request.headers),
-    // A consumed body cannot be replayed, so a retried upload is reported
-    // honestly rather than sent with a truncated body.
-    body: request.bodyUsed ? null : request.body,
-    // `redirect` and `mode` are deliberately not copied: the SDK sets them, and
-    // a `Request` built without them defaults differently from the original.
-  });
-  replayed.headers.set('Authorization', `Bearer ${accessToken}`);
-  replayed.headers.set(RETRY_MARKER, '1');
-
-  return fetch(replayed);
-};
+    return fetch(replayed);
+  };
+}

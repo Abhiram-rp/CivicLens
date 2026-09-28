@@ -1,9 +1,12 @@
+import type { Injector } from '@angular/core';
 import { client } from '../../api/generated/client.gen';
 import { API_BASE_URL } from './api-base-url';
-import { authInterceptor } from '../auth/auth.interceptor';
+import { AuthService } from '../auth/auth.service';
+import { createAuthInterceptor } from '../auth/auth.interceptor';
 import { correlationIdInterceptor } from '../auth/correlation-id.interceptor';
-import { refreshInterceptor } from '../auth/refresh.interceptor';
-import { trackingTokenInterceptor } from '../tracking/tracking-token.interceptor';
+import { createRefreshInterceptor } from '../auth/refresh.interceptor';
+import { createTrackingTokenInterceptor } from '../tracking/tracking-token.interceptor';
+import { TrackingTokenStore } from '../tracking/tracking-token.store';
 
 // Re-exported so existing importers keep one obvious place to look, while the
 // literal itself lives in `api-base-url.ts` where `apiPath` can read it without
@@ -20,6 +23,18 @@ const registered: Array<{ chain: Chain; id: number }> = [];
 /**
  * Register the interceptor chain on the generated client.
  *
+ * Takes an `Injector` because the interceptors need `AuthService` and
+ * `TrackingTokenStore`, and the generated client invokes them with no injection
+ * context. They are therefore built here, once, with the dependencies resolved -
+ * the closures hold the *services*, not the tokens, so a refresh still takes
+ * effect on the next request.
+ *
+ * This also means the caller must supply an injector, which is what forces the
+ * call to happen inside an injection context (`app.config.ts` uses
+ * `provideAppInitializer`). Before that was true, `inject()` inside an
+ * interceptor compiled, type-checked, unit-tested and threw `NG0203` on the
+ * first real request.
+ *
  * Order is registration order and is not arbitrary:
  *
  *   1. `trackingTokenInterceptor` - the tracking token is a distinct credential
@@ -32,7 +47,7 @@ const registered: Array<{ chain: Chain; id: number }> = [];
  *   4. `correlationIdInterceptor` - reads the error envelope, so it runs last
  *      and sees the final response, including a successful retry.
  */
-export function configureApiClient(): void {
+export function configureApiClient(injector: Injector): void {
   if (registered.length > 0) {
     return;
   }
@@ -56,12 +71,15 @@ export function configureApiClient(): void {
     throwOnError: true,
   });
 
+  const auth = injector.get(AuthService);
+  const tracking = injector.get(TrackingTokenStore);
+
   const { request: requestChain, response: responseChain } = client.interceptors;
 
   registered.push(
-    { chain: requestChain, id: requestChain.use(trackingTokenInterceptor) },
-    { chain: requestChain, id: requestChain.use(authInterceptor) },
-    { chain: responseChain, id: responseChain.use(refreshInterceptor) },
+    { chain: requestChain, id: requestChain.use(createTrackingTokenInterceptor(tracking)) },
+    { chain: requestChain, id: requestChain.use(createAuthInterceptor(auth)) },
+    { chain: responseChain, id: responseChain.use(createRefreshInterceptor(auth)) },
     { chain: responseChain, id: responseChain.use(correlationIdInterceptor) },
   );
 }

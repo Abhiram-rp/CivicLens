@@ -1,8 +1,9 @@
 import { setupServer } from 'msw/node';
 import { TestBed } from '@angular/core/testing';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { authInterceptor } from '../app/core/auth/auth.interceptor';
-import { trackingTokenInterceptor } from '../app/core/tracking/tracking-token.interceptor';
+import { createAuthInterceptor } from '../app/core/auth/auth.interceptor';
+import { createTrackingTokenInterceptor } from '../app/core/tracking/tracking-token.interceptor';
+import { AuthService } from '../app/core/auth/auth.service';
 import { TokenStore } from '../app/core/token-store';
 import { TrackingTokenStore } from '../app/core/tracking/tracking-token.store';
 import { isSessionExempt } from '../app/core/api/session-policy';
@@ -50,34 +51,76 @@ function get(path: string): Request {
  */
 const options = { headers: new Headers(), url: '/' } as ResolvedRequestOptions;
 
-/** Invoke an interceptor exactly as the generated client does, and await it. */
-async function runAuth(request: Request): Promise<Request> {
-  return await TestBed.runInInjectionContext(() => authInterceptor(request, options));
+/**
+ * Invoke an interceptor exactly as the generated client does, and await it.
+ *
+ * Deliberately *not* wrapped in `TestBed.runInInjectionContext`. That wrapper was
+ * here to make `inject()` work inside the interceptors, and it hid a bug that
+ * made every authenticated request in the real app throw `NG0203` - the
+ * generated client provides no injection context, and the wrapper supplied one
+ * the browser never would. The interceptors now take their dependency as a
+ * parameter, so there is nothing to manufacture and a test that accidentally
+ * reintroduces `inject()` here fails loudly.
+ */
+function runAuth(request: Request): Promise<Request> {
+  return Promise.resolve(
+    createAuthInterceptor(auth)(request, options),
+  );
 }
 
-async function runTracking(request: Request): Promise<Request> {
-  return await TestBed.runInInjectionContext(() => trackingTokenInterceptor(request, options));
+function runTracking(request: Request): Promise<Request> {
+  return Promise.resolve(
+    createTrackingTokenInterceptor(tracking)(request, options),
+  );
+}
+
+/**
+ * The services the interceptors close over, resolved the way `api-client.config`
+ * resolves them: once, from the injector, at registration.
+ */
+let auth: AuthService;
+let tracking: TrackingTokenStore;
+let tokens: TokenStore;
+
+function configure(): void {
+  // Cleared *before* anything is constructed, not after. `TrackingTokenStore`
+  // reads `localStorage` in its constructor, so a store built while a previous
+  // test's token is still on disk keeps it in memory where clearing the storage
+  // can no longer reach it. The result is a spec where "sends no token when none
+  // is held" fails depending on which test ran before it.
+  window.localStorage.clear();
+
+  TestBed.configureTestingModule({ providers: [TokenStore, TrackingTokenStore] });
+  tokens = TestBed.inject(TokenStore);
+  auth = TestBed.inject(AuthService);
+  tracking = TestBed.inject(TrackingTokenStore);
 }
 
 beforeAll(() => {
   server.listen({ onUnhandledRequest: 'error' });
-  TestBed.configureTestingModule({ providers: [TokenStore, TrackingTokenStore] });
+  configure();
 });
 
 afterEach(() => {
   server.resetHandlers();
   TestBed.resetTestingModule();
-  TestBed.configureTestingModule({ providers: [TokenStore, TrackingTokenStore] });
-  window.localStorage.clear();
+  configure();
 });
 
 afterAll(() => {
   server.close();
 });
 
-/** Seed a session, as a successful login would. */
+/**
+ * Seed a session, as a successful login would.
+ *
+ * Goes through the same `TokenStore` instance the interceptor's closure holds,
+ * captured by `configure`. Resolving a second time would work today and break
+ * quietly the day the injector is reconfigured, and a spec that reports a
+ * missing bearer because of test plumbing is worse than no spec.
+ */
 function signIn(accessToken: string): void {
-  TestBed.inject(TokenStore).set(accessToken, 900);
+  tokens.set(accessToken, 900);
 }
 
 describe('the bearer reaches only the paths that need it', () => {
@@ -140,7 +183,7 @@ describe('the bearer reaches only the paths that need it', () => {
 
 describe('the tracking token reaches only the tracked tree', () => {
   it('attaches X-Tracking-Token to the tracked tree', async () => {
-    TestBed.inject(TrackingTokenStore).save(MOCK_TRACKING_TOKEN);
+    tracking.save(MOCK_TRACKING_TOKEN);
 
     const outgoing = await runTracking(get('/tracked/issues'));
 
@@ -150,7 +193,7 @@ describe('the tracking token reaches only the tracked tree', () => {
   });
 
   it('never sends the tracking token anywhere else', async () => {
-    TestBed.inject(TrackingTokenStore).save(MOCK_TRACKING_TOKEN);
+    tracking.save(MOCK_TRACKING_TOKEN);
 
     for (const path of ['/issues/mine', '/public/issues/CL-2026-0002', '/auth/login']) {
       const outgoing = await runTracking(get(path));

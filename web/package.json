@@ -11,7 +11,8 @@
     "gen:api": "openapi-ts",
     "check:api": "node scripts/check-generated-api.mjs",
     "check:contract": "node scripts/check-generated-api.mjs && node ../scripts/check-rate-limit-pairing.mjs",
-    "verify": "npm run check:contract && npm run test:ci && npm run build"
+    "check:bundle": "node scripts/check-bundle-budget.mjs",
+    "verify": "npm run check:contract && npm run test:ci && npm run build && npm run check:bundle"
   },
   "private": true,
   "packageManager": "npm@12.0.2",

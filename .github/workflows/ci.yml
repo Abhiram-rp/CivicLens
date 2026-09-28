@@ -1,0 +1,140 @@
+# CivicLens continuous integration.
+#
+# Every job here corresponds to a line in REQUIREMENTS.md, and none of them
+# invents a gate the document does not ask for:
+#
+#   contract  - 103: "The contract is authored, not derived... written first and
+#               linted in CI", plus 117: rate-limit identity must be paired with
+#               the SPEC rules it exists to enforce.
+#   secrets   - 133: "Secrets 100% environment-sourced; `.env` gitignored;
+#               gitleaks in CI".
+#   web       - 169: the citizen shell's initial bundle, and the credential and
+#               disclosure rules in SPEC 3.2 and 7.1, which live in the frontend
+#               test suite. `npm run verify` is the whole gate; the job below adds
+#               nothing but a clean checkout to run it in.
+#
+# One requirement is deliberately NOT implemented here, because it cannot be yet:
+#
+#   REQUIREMENTS.md 104 - "CI must diff springdoc's generated /v3/api-docs
+#   against the hand-authored file and fail on any difference."
+#
+#   That needs a running Spring Boot application, and there is no backend. The
+#   document anticipates this: "Until the backend exists the hand-authored file is
+#   the only contract, and nothing can drift from it." `contract` above is what
+#   makes that true today - the contract is linted, and the generated Angular
+#   client is checked against it byte for byte. When the backend lands, add a job
+#   that boots it and diffs. Do not add a placeholder that passes vacuously.
+#
+# REQUIREMENTS.md 89 - "No test and no CI job may make a real API call" - holds
+# here: every check below is local and offline. The contract lint is text-only,
+# the generation check regenerates from a local file, and the tests use MSW.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Also run on demand, because the first job a person reaches for when a gate
+  # misbehaves is "re-run this", not "find which commit turned it red".
+  workflow_dispatch:
+
+# Least privilege: nothing here writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  secrets:
+    name: gitleaks
+    # REQUIREMENTS.md 133.
+    #
+    # The official gitleaks action needs a licence key on private repositories and
+    # is a third-party dependency in a security job, which is a poor trade. The
+    # release binary is fetched directly at a pinned version instead, so the scan
+    # is reproducible and auditable.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a secret committed in an earlier commit is still a
+          # committed secret, and a shallow clone would report the tree as clean.
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          version=8.24.2
+          curl -fsSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Scan for committed secrets
+        run: |
+          # `--redact` because a real finding would otherwise print the value into
+          # the job log, which is a copy in a place the reporter does not control.
+          gitleaks detect --source . --redact --no-banner
+
+  contract:
+    name: contract
+    # REQUIREMENTS.md 103 and 117.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the toolchain pinned in REQUIREMENTS.md 33 and the version
+          # the lockfile was produced with.
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Lint the OpenAPI contract
+        run: npx --yes @redocly/cli@latest lint api/openapi/civiclens-v1.yaml
+
+      - name: Check rate-limit identity pairs against SPEC
+        run: node scripts/check-rate-limit-pairing.mjs
+
+      - name: Check the generated client matches the contract
+        # The check regenerates into a temp directory, so it needs the frontend
+        # dependencies but not the whole `verify` chain.
+        working-directory: web
+        run: |
+          npm ci
+          npm run check:api
+
+  web:
+    name: web
+    # REQUIREMENTS.md 169, and SPEC 3.2 / 7.1 via the frontend suite.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        working-directory: web
+        # `ci`, not `install`: the lockfile is the point. `npm install` would
+        # resolve fresh versions and could pass on a tree that cannot be
+        # reproduced from this commit.
+        run: npm ci
+
+      - name: Verify
+        working-directory: web
+        # check:contract - 56/56 operations, byte-identical regeneration, base URL
+        #               agreement, rate-limit identity pairs
+        # test:ci      - 99 tests: credential placement, refresh single-flight,
+        #               disclosure rules, routes, shells, theme
+        # build        - production build, must compile
+        # check:bundle - citizen shell within 250 kB gzipped, no msw shipped
+        run: npm run verify
