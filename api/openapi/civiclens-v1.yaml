@@ -1,0 +1,2840 @@
+openapi: 3.1.0
+
+# =============================================================================
+# CivicLens API — v1 contract
+#
+# THIS FILE IS THE SINGLE SOURCE OF TRUTH FOR THE API SHAPE.
+#
+# Authority: docs/SPEC.md governs what the system is; this file governs the
+# wire contract. Build the Angular client against this file, and build the
+# Spring Boot controllers to match it exactly.
+#
+# Conventions encoded here (see docs/SPEC.md for the reasoning):
+#   - x-required-roles on every operation is the authoritative authorization
+#     rule. A test will assert every endpoint in the backend carries a
+#     matching @PreAuthorize, so this file cannot silently drift from the
+#     code.
+#   - Visibility is 404, never 403, for anything the caller cannot see.
+#     403 means "your role can never use this endpoint at all".
+#   - Errors always use the ErrorEnvelope, including inside list endpoints.
+#   - POST /issues replays the original 201 body on an Idempotency-Key repeat;
+#     a repeat is NOT an error.
+#   - The @PreAuthorize drift assertion applies to operations whose
+#     x-required-roles is NON-EMPTY. Operations that accept an EITHER a session
+#     OR a tracking token (POST /issues and the whole /tracked tree) carry an
+#     empty x-required-roles and are checked in the service layer, because
+#     @PreAuthorize cannot express "anonymous OR CITIZEN".
+#
+# Anonymity rules encoded here (see docs/SPEC.md section 6):
+#   - A report's identity is EITHER a user id OR an unguessable tracking token.
+#     It is never both, and `publicCode` is never a credential.
+#   - The tracking token is returned exactly once, in the 201 body, and is
+#     stored only as a hash. There is no endpoint that can recover it.
+#   - /tracked/** responses are built from an explicit field allowlist and
+#     never contain reporter identity, internal notes or exact coordinates.
+#
+# Drift control: once the Spring Boot service exists, springdoc generates a
+# second document at /v3/api-docs. CI must diff that generated document against
+# this file and fail on any difference. Until the backend exists, this file is
+# the only contract and nothing can drift from it.
+#
+# Actuator (/actuator/health) is an operations surface and is deliberately not
+# part of this contract.
+# =============================================================================
+
+info:
+  title: CivicLens API
+  version: "1.0.0"
+  summary: AI-assisted civic issue reporting and resolution.
+  description: |
+    CivicLens lets citizens report infrastructure problems (potholes, broken
+    streetlights, garbage, drainage, leaks, electrical faults, safety hazards)
+    with text, photos and location, and lets departments triage, assign and
+    resolve them against SLAs.
+
+    AI *recommends*; deterministic rules *decide*. No AI output ever sets an
+    issue's status, category or priority directly, and the entire product
+    works with the AI provider switched off.
+
+    Terminology: the domain and this API say "issue". The user interface says
+    "report".
+  contact:
+    name: CivicLens
+    url: https://github.com/Abhiram-rp/CivicLens
+  # No SPDX license: this repository is not published under an open licence.
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development
+  - url: https://civiclens.example.org/api/v1
+    description: Production placeholder
+
+tags:
+  - name: auth
+    description: Registration, login, token refresh, logout
+  - name: issues
+    description: The core aggregate — report, track, act
+  - name: duplicates
+    description: Duplicate candidate review
+  - name: public
+    description: Unauthenticated, redacted, rate-limited
+  - name: tracked
+    description: |
+      The anonymous reporter's own reports, authenticated by an unguessable
+      tracking token presented in a header. Unauthenticated in the JWT sense
+      but strictly scoped — a token reaches only the issues created with it.
+  - name: notifications
+    description: In-app notifications
+  - name: dashboard
+    description: Role-specific aggregate
+  - name: reference
+    description: Reference data for form dropdowns
+  - name: devices
+    description: Push token registration, wired in P5
+  - name: admin
+    description: Configuration and audit
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  # ===========================================================================
+  # AUTH
+  # ===========================================================================
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: Register as a citizen
+      description: |
+        Self-service citizen registration only. A caller can never choose a
+        role. Passwords are BCrypt-hashed at cost >= 12 and are never returned
+        in any response.
+      operationId: register
+      x-required-roles: []
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+            examples:
+              default:
+                value:
+                  email: meera@example.org
+                  password: correct-horse-battery-staple
+                  fullName: Meera Nair
+                  phone: "+919876543210"
+      responses:
+        '201':
+          description: Registered. The account starts ACTIVE.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegisteredUser' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409':
+          description: Email already registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Log in and receive tokens
+      description: |
+        `clientType` selects how the refresh token is delivered, which is what
+        makes the same endpoint serve both the browser and the future mobile
+        app. This is the single most important mobile-readiness decision in the
+        contract — do not collapse it into a cookie-only flow.
+
+        - `WEB` — refresh token is set as an HttpOnly, SameSite=Strict cookie
+          and is NOT present in the response body.
+        - `MOBILE` — refresh token is returned in the body for the client to
+          store in platform secure storage.
+      operationId: login
+      x-required-roles: []
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+            examples:
+              web:
+                summary: Browser
+                value: { email: meera@example.org, password: "...", clientType: WEB }
+              mobile:
+                summary: Future mobile app
+                value: { email: meera@example.org, password: "...", clientType: MOBILE }
+      responses:
+        '200':
+          description: Authenticated
+          headers:
+            Set-Cookie:
+              description: 'WEB only: HttpOnly; SameSite=Strict; Path=/api/v1/auth'
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429':
+          description: |
+            Rate limited. Two independent limits apply: 5 per minute per IP and
+            10 per hour per account. A generic message is returned in both
+            cases so the response does not reveal whether an account exists.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Exchange a refresh token for a new access token
+      description: |
+        Refresh tokens are rotated on every use: the presented token is revoked
+        and `replacedBy` is recorded. Presenting an already-revoked token is
+        treated as theft and revokes the whole token family for that user,
+        forcing a fresh login.
+
+        `WEB` sends no body; the cookie is read automatically.
+        `MOBILE` must send `refreshToken` in the body.
+      operationId: refreshToken
+      x-required-roles: []
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: New access token. A rotated refresh token is returned in the body for MOBILE, or set as a cookie for WEB.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenRefreshResponse' }
+        '401':
+          description: |
+            Invalid, expired, or already-used refresh token. If the token was
+            already used, the entire family is revoked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke the current session
+      operationId: logout
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '204': { description: Session revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ===========================================================================
+  # ISSUES
+  # ===========================================================================
+  /issues:
+    post:
+      tags: [issues]
+      summary: Report an issue (signed in, or anonymously)
+      description: |
+        Multipart because a report carries up to 3 photos. Photos are
+        normalized **server-side** (EXIF orientation applied, HEIC transcoded,
+        resized to 1600px, re-encoded under 2MB, EXIF GPS stripped) because the
+        mobile client's images are the largest and most awkward.
+
+        ## Two ways in, one endpoint
+
+        A valid `Authorization` header means a signed-in CITIZEN is the
+        reporter. No header means the report is anonymous and the caller is
+        identified by the tracking token issued in the 201 body. One endpoint
+        rather than two, because the multipart contract, validation, duplicate
+        detection and idempotency are identical, and two copies of them would
+        drift.
+
+        A present-but-invalid `Authorization` header is a 401. A missing one is
+        never an error here — that is the anonymous path, and answering 401
+        would make reporting without an account impossible.
+
+        ## Disclosure
+
+        `disclosure` is the reporter's explicit choice, never inferred:
+
+        - `SHARE_DETAILS` — the reporter's name and contact details are visible
+          to the staff handling the issue.
+        - `ANONYMOUS` — the issue is recorded with no reporter identity at all
+          and staff see it as coming from an anonymous citizen.
+
+        ## The tracking token
+
+        `publicCode` is a dense sequential range starting at `CIV-100001` and is
+        therefore enumerable, so it is a share handle and **never** a
+        credential. An anonymous report is instead tracked by a separate
+        unguessable token returned exactly once here. It is stored only as a
+        hash, is scoped to the issues created with it, and is presented in the
+        `X-Tracking-Token` header on `/tracked/**`. No endpoint can recover or
+        re-issue it, so a citizen who loses it loses access to the anonymous
+        report. That is the intended trade for anonymity, and it is why the
+        response tells the client to store the token before anything else.
+
+        The token travels in a header rather than the query string so it stays
+        out of access logs and `Referer` headers.
+
+        ## Idempotency
+
+        `Idempotency-Key` is required. A citizen on throttled 3G who
+        double-taps or retries must not create two reports. On a repeat of the
+        same key by the same reporter, this endpoint returns the ORIGINAL 201
+        body with 201 — not an error. The idempotency record retains the
+        plaintext token for the idempotency TTL so that a replay returns the
+        *same* token; after that TTL it is unrecoverable and a late retry
+        produces a fresh report rather than a broken one.
+
+        ## Rate limit
+
+        The bucket is keyed on the user id when signed in and on a salted hash
+        of the client IP when anonymous, so anonymous spam is still bounded
+        without the bucket key itself identifying anyone.
+      operationId: createIssue
+      x-required-roles: []
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/IssueCreateForm' }
+            encoding:
+              photos:
+                style: form
+                explode: true
+                contentType: image/jpeg, image/png, image/webp, image/heic
+      responses:
+        '201':
+          description: |
+            Report created, status SUBMITTED. Also returned when an
+            Idempotency-Key is replayed, carrying the original tracking token.
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueCreateResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+    get:
+      tags: [issues]
+      summary: List issues, scoped to the caller's role
+      description: |
+        Results are scoped **server-side**: a citizen sees only their own, an
+        officer only issues assigned to them, a manager only their department,
+        an admin everything. This is the endpoint where an authorization bug
+        leaks the most data, so it has a dedicated IDOR test.
+
+        Returns a lean summary — no description body, no comments, no
+        attachments. Full detail is a separate call so that list payloads stay
+        small on a weak connection.
+
+        Free-text search is deliberately absent. Every queue need in P1 is a
+        filter, and `q` needs `pg_trgm` plus a relevance decision; it arrives in
+        P2 on `GET /issues` only, and when it does it inherits this endpoint's
+        server-side scoping — for a CITIZEN it may only ever match their own
+        reports, or         `?q=` becomes an enumeration primitive over other people's
+        reports.
+
+        Anonymous reports are in scope for officers, managers and admins like
+        any other issue, with `reporterId` null and `disclosure: ANONYMOUS`.
+        They are never in a citizen's scope, not even that citizen's own —
+        an anonymous report is reachable only through `/tracked/**`.
+      operationId: listIssues
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/SizeParam'
+        - name: status
+          in: query
+          description: Repeatable. Omit for all.
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/IssueStatus' }
+          style: form
+          explode: true
+        - name: categoryId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: priority
+          in: query
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/Priority' }
+          style: form
+          explode: true
+        - name: departmentId
+          in: query
+          description: Honoured for managers and admins. Ignored for citizens and officers.
+          schema: { type: string, format: uuid }
+        - name: createdFrom
+          in: query
+          schema: { type: string, format: date-time }
+        - name: createdTo
+          in: query
+          schema: { type: string, format: date-time }
+        - name: staleResolvedOnly
+          in: query
+          description: |
+            Manager and admin only. Issues RESOLVED for longer than
+            STALE_RESOLVED_DAYS with no citizen confirmation. This queue is the
+            non-destructive replacement for the removed auto-close: the manager
+            sees the backlog and nothing transitions on its own.
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: A page of issue summaries
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueSummaryPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /issues/mine:
+    get:
+      tags: [issues]
+      summary: List my own reports
+      description: Convenience endpoint for the citizen's "My reports" screen. Same shape as `GET /issues`; scoping makes it redundant but it keeps the client simple and is trivially cacheable per user.
+      operationId: listMyIssues
+      x-required-roles: [CITIZEN]
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/SizeParam'
+        - name: status
+          in: query
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/IssueStatus' }
+          style: form
+          explode: true
+      responses:
+        '200':
+          description: A page of the caller's own issues
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueSummaryPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /issues/{issueId}:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+    get:
+      tags: [issues]
+      summary: Get one issue
+      description: |
+        Full detail for a caller who can see it. Status history, attachments
+        and SLA state are embedded because the detail screen always needs
+        them — one round trip instead of three. Comments are NOT embedded;
+        they are fetched separately so a long thread never bloats this payload.
+
+        Returns **404, not 403**, when the caller cannot see the issue. A 403
+        would confirm the issue exists, which is the IDOR leak this rule exists
+        to prevent.
+
+        A CITIZEN reaches only their own signed-in reports here. Their own
+        *anonymous* reports are deliberately not reachable from this path,
+        because doing so would require accepting a tracking token here and
+        quietly turning a role-scoped endpoint into a bearer-token one. They use
+        `/tracked/issues/{issueId}` instead.
+      operationId: getIssue
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '200':
+          description: The issue
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+    put:
+      tags: [issues]
+      summary: Edit my report
+      description: |
+        Allowed only while the issue is SUBMITTED or AI_ANALYZING — i.e. before
+        triage. Once a department has triaged it, the report is part of an
+        official record and is corrected through comments, not by rewriting it.
+      operationId: updateIssue
+      x-required-roles: [CITIZEN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IssueUpdateRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404':
+          description: Not found, not visible, or not the caller's report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: Issue is past the editable point
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /issues/{issueId}/comments:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+    get:
+      tags: [issues]
+      summary: List comments on an issue
+      operationId: listComments
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '200':
+          description: Comments oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Comment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [issues]
+      summary: Add a comment
+      description: |
+        Visibility is server-decided from the caller's role, never sent by the
+        client: a client that could choose INTERNAL vs PUBLIC would be a way
+        for a citizen to publish an internal note.
+      operationId: addComment
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CommentCreateRequest' }
+      responses:
+        '201':
+          description: Created
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Comment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /issues/{issueId}/comments/{commentId}:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+      - $ref: '#/components/parameters/CommentIdPath'
+    put:
+      tags: [issues]
+      summary: Edit my comment
+      description: |
+        Author only, and only within COMMENT_EDIT_WINDOW_MINUTES (default 30).
+        Outside the window it is 422 COMMENT_EDIT_WINDOW_EXPIRED — the same
+        window `/reopen` conceptually uses, and for the same reason: an official
+        record should not be quietly rewritten after people have stopped
+        expecting it to change.
+
+        **The body is never overwritten in place.** Every save writes a
+        `comment_revisions` row holding the previous text, and the response
+        carries `editedAt` and `revisionCount` so the UI can show "edited" and
+        fetch history. `issue_status_history` and `audit_logs` remain strictly
+        append-only; this is a separate, equally immutable revision table rather
+        than a hole in the audit trail.
+
+        Every edit also writes an `audit_logs` row (`COMMENT_EDITED`) with the
+        old and new text. An official record that can be corrected should be
+        able to show what the correction was.
+
+        Editing a PUBLIC comment invalidates any cached
+        `resolutionReport.aiSummary`, which is written from the thread and would
+        otherwise keep describing text that no longer exists. The summary is
+        regenerated on the next explicit request, not eagerly on edit.
+      operationId: updateComment
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CommentUpdateRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Comment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: COMMENT_EDIT_WINDOW_EXPIRED, or the caller is not the author
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    delete:
+      tags: [issues]
+      summary: Delete my comment
+      description: |
+        Author only, same window as edit. This is a **soft delete**: the row
+        survives with `deletedAt` set and is rendered as "removed by author", so
+        a thread never appears to have been tampered with. The text is retained
+        for the audit trail and purged by the retention job.
+
+        An ADMIN may delete any comment as moderation without the window
+        applying; that path requires a reason and is audited as
+        `COMMENT_DELETED_BY_MODERATOR`.
+      operationId: deleteComment
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '204': { description: Soft-deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: COMMENT_EDIT_WINDOW_EXPIRED, or the caller is not the author
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /issues/{issueId}/comments/{commentId}/revisions:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+      - $ref: '#/components/parameters/CommentIdPath'
+    get:
+      tags: [issues]
+      summary: List the previous versions of a comment
+      description: |
+        Staff-only in practice: the author sees "edited" and, on an INTERNAL
+        comment, never the history of a colleague's wording. Visibility follows
+        the same server-side rule as the comment itself, so a citizen can only
+        ever read the revision history of a PUBLIC comment they can already see.
+      operationId: listCommentRevisions
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '200':
+          description: Revisions, oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CommentRevision' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /issues/{issueId}/assign:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+    post:
+      tags: [issues]
+      summary: Assign an officer
+      description: |
+        The manager must belong to the same department as the issue, and the
+        officer must be active and in that department. A manager cannot reach
+        across departments — that is a 422, not a 403, because the resource
+        exists and the operation is invalid rather than forbidden.
+      operationId: assignIssue
+      x-required-roles: [DEPARTMENT_MANAGER, ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssignRequest' }
+      responses:
+        '200':
+          description: Assigned. Status becomes ASSIGNED.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Caller is not a manager of this issue's department
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: OFFICER_NOT_IN_DEPARTMENT
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /issues/{issueId}/status:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+    post:
+      tags: [issues]
+      summary: Move an issue to another status
+      description: |
+        The generic status command for staff. Authority is per target status,
+        enforced server-side by the state machine:
+        TRIAGED->ASSIGNED and TRIAGED->REJECTED and TRIAGED->DUPLICATE require
+        DEPARTMENT_MANAGER; ASSIGNED->IN_PROGRESS and IN_PROGRESS->RESOLVED
+        require the assignee; RESOLVED->CLOSED and RESOLVED->REOPENED require
+        the reporter.
+
+        There is no SYSTEM actor on any transition, and nothing closes an issue
+        on a timer: RESOLVED->CLOSED is the citizen's decision alone. An
+        authority that fixes a report and then never hears back is surfaced in
+        the manager's `staleResolvedOnly` queue, not closed out from under the
+        citizen.
+
+        Prefer the dedicated endpoints (`/resolve`, `/confirm`, `/reopen`) where
+        they exist — they carry the extra preconditions and payloads that a
+        bare status change cannot.
+      operationId: changeIssueStatus
+      x-required-roles: [DEPARTMENT_MANAGER, ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatusChangeRequest' }
+      responses:
+        '200':
+          description: Status changed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Role is never allowed to make this transition
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /issues/{issueId}/transition:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+    post:
+      tags: [issues]
+      summary: Bulk status transition for queue screens
+      description: |
+        Thin alias of `/status`, intended for manager queue bulk actions where
+        the client already holds a filtered list. Same state machine, same
+        authorization, same errors. Exists so a queue view does not have to
+        hand-roll transition logic; it is NOT a way to bypass `/resolve`,
+        `/confirm` or `/reopen` preconditions — those still apply.
+      operationId: transitionIssue
+      x-required-roles: [DEPARTMENT_MANAGER, ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatusChangeRequest' }
+      responses:
+        '200':
+          description: Status changed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /issues/{issueId}/resolve:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+    post:
+      tags: [issues]
+      summary: Resolve an issue (assignee only)
+      description: |
+        Multipart: notes are required, at least one evidence photo is
+        recommended but not mandatory (an officer fixing a buried water main
+        has nothing to photograph). The resulting ResolutionReport is what the
+        AI summary is written against in P3, so it is created here rather than
+        as a comment.
+      operationId: resolveIssue
+      x-required-roles: [FIELD_OFFICER]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/ResolveForm' }
+      responses:
+        '200':
+          description: Resolved. Status becomes RESOLVED and the reporter is notified.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403':
+          description: Caller is not the assignee
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /issues/{issueId}/confirm:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+    post:
+      tags: [issues]
+      summary: Confirm the fix (reporter only)
+      description: Closes the issue. This is the citizen's satisfaction signal and the main input to resolution-rate statistics, so it is a first-class action, not a status edit.
+      operationId: confirmResolution
+      x-required-roles: [CITIZEN]
+      responses:
+        '200':
+          description: Closed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /issues/{issueId}/reopen:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+    post:
+      tags: [issues]
+      summary: Reopen a resolved or closed issue (reporter only)
+      description: |
+        Allowed from RESOLVED **or** CLOSED, within the reopen window
+        (REOPEN_WINDOW_DAYS, default 14).
+
+        Reachable from CLOSED on purpose, and now the only thing protecting the
+        citizen's right to dispute a fix. There is no auto-close, so a closure
+        is always the citizen's own decision or their explicit confirmation of
+        someone else's work — and either way the door stays open for the full
+        window.
+
+        A reason is required and is recorded in the audit trail.
+      operationId: reopenIssue
+      x-required-roles: [CITIZEN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 10
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Reopened
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: REOPEN_WINDOW_EXPIRED
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /issues/{issueId}/duplicates:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+    get:
+      tags: [issues]
+      summary: List duplicate candidates for review
+      description: Candidates only ever arrive as SUGGESTED. Nothing is ever auto-merged.
+      operationId: listDuplicates
+      x-required-roles: [DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '200':
+          description: Candidates, best match first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DuplicateMatch' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ===========================================================================
+  # DUPLICATE REVIEW
+  # ===========================================================================
+  /duplicates/{matchId}/confirm:
+    parameters:
+      - $ref: '#/components/parameters/MatchIdPath'
+    post:
+      tags: [duplicates]
+      summary: Confirm two issues are the same
+      operationId: confirmDuplicate
+      x-required-roles: [DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '200':
+          description: Confirmed. A manager may then move the issue to DUPLICATE.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DuplicateMatch' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /duplicates/{matchId}/reject:
+    parameters:
+      - $ref: '#/components/parameters/MatchIdPath'
+    post:
+      tags: [duplicates]
+      summary: Reject a duplicate candidate
+      description: The rejection is recorded, which is what lets a threshold be tuned later instead of guessed.
+      operationId: rejectDuplicate
+      x-required-roles: [DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '200':
+          description: Rejected
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DuplicateMatch' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ===========================================================================
+  # TRACKED (anonymous reporter, token in header)
+  # ===========================================================================
+  # A separate tree rather than extra credentials on the /issues paths, for two
+  # reasons. First, it keeps the x-required-roles drift assertion meaningful:
+  # every operation here is unauthenticated and checked in the service layer,
+  # rather than five role-scoped endpoints quietly becoming bearer-token ones.
+  # Second, the response allowlist is a different shape from IssueDetail, and a
+  # separate path makes it obvious that reporter identity is not merely omitted
+  # but structurally absent.
+  /tracked/issues:
+    get:
+      tags: [tracked]
+      summary: List the reports created with my tracking token
+      description: |
+        Every report created with this token, newest first. A citizen who
+        reports from a shared kiosk or a family phone accumulates several
+        reports under one token, so this is a list and not a single resource.
+
+        Status is read live. There are no in-app notifications for an anonymous
+        report — a notification needs an account to deliver to — so this
+        endpoint is how an anonymous reporter finds out what happened.
+      operationId: listTrackedIssues
+      x-required-roles: []
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TrackingTokenHeader'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/SizeParam'
+      responses:
+        '200':
+          description: A page of the caller's own anonymous reports
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueSummaryPage' }
+        '401':
+          description: No X-Tracking-Token header was sent
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '404':
+          description: The token is not recognised
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /tracked/issues/{issueId}:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+      - $ref: '#/components/parameters/TrackingTokenHeader'
+    get:
+      tags: [tracked]
+      summary: Track one of my anonymous reports
+      description: |
+        The anonymous counterpart of `GET /issues/{issueId}`, built from an
+        explicit allowlist (`TrackedIssueDetail`) rather than from IssueDetail
+        with fields nulled. Reporter fields are structurally absent, exact
+        coordinates are rounded to the ~100m grid exactly as on the public page,
+        internal notes and AI reasoning are excluded, and `assignedOfficerName`
+        is included — a citizen is entitled to know who is handling their report.
+      operationId: getTrackedIssue
+      x-required-roles: []
+      security: []
+      responses:
+        '200':
+          description: The issue
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrackedIssueDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+    put:
+      tags: [tracked]
+      summary: Edit my anonymous report
+      description: |
+        Same rule as the signed-in path: only while SUBMITTED or AI_ANALYZING.
+        After triage the report is an official record and is corrected through
+        comments.
+      operationId: updateTrackedIssue
+      x-required-roles: []
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IssueUpdateRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrackedIssueDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Issue is past the editable point
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /tracked/issues/{issueId}/comments:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+      - $ref: '#/components/parameters/TrackingTokenHeader'
+    get:
+      tags: [tracked]
+      summary: List the public comments on my anonymous report
+      description: |
+        INTERNAL comments are filtered out server-side. A test asserts the
+        response contains no `visibility: INTERNAL` row, because an internal
+        note leaking to a citizen is the most damaging single bug this
+        endpoint could have.
+      operationId: listTrackedComments
+      x-required-roles: []
+      security: []
+      responses:
+        '200':
+          description: Public comments, oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Comment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [tracked]
+      summary: Comment on my anonymous report
+      description: |
+        Always PUBLIC — there is no role here for a server-decided INTERNAL to
+        contrast with. The author is recorded as the anonymous reporter, and
+        the comment is attributable to the token, not to a person.
+      operationId: addTrackedComment
+      x-required-roles: []
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CommentCreateRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Comment' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /tracked/issues/{issueId}/confirm:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+      - $ref: '#/components/parameters/TrackingTokenHeader'
+    post:
+      tags: [tracked]
+      summary: Confirm the fix on my anonymous report
+      description: |
+        The anonymous counterpart of `POST /issues/{issueId}/confirm`, and it is
+        the only way an issue ever reaches CLOSED. An anonymous reporter who
+        is satisfied closes their own report; nobody closes it for them.
+      operationId: confirmTrackedResolution
+      x-required-roles: []
+      security: []
+      responses:
+        '200':
+          description: Closed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrackedIssueDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /tracked/issues/{issueId}/reopen:
+    parameters:
+      - $ref: '#/components/parameters/IssueIdPath'
+      - $ref: '#/components/parameters/TrackingTokenHeader'
+    post:
+      tags: [tracked]
+      summary: Reopen my anonymous report
+      description: |
+        Same preconditions as the signed-in path, including the 14-day window.
+        A reason is required and is recorded in the audit trail, attributed to
+        the token rather than to a user.
+      operationId: reopenTrackedIssue
+      x-required-roles: []
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 10
+                  maxLength: 1000
+      responses:
+        '200':
+          description: Reopened
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TrackedIssueDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422':
+          description: REOPEN_WINDOW_EXPIRED
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  # ===========================================================================
+  # PUBLIC
+  # ===========================================================================
+  /public/issues/{publicCode}:
+    parameters:
+      - name: publicCode
+        in: path
+        required: true
+        description: Human-readable code, e.g. CIV-100482
+        schema: { type: string, pattern: '^CIV-[0-9]+$' }
+    get:
+      tags: [public]
+      summary: Public shareable issue page
+      description: |
+        The one unauthenticated read surface, for a shareable link a citizen
+        can send to a neighbour or a councillor.
+
+        The response is a dedicated redacted type built from an explicit field
+        allowlist. It is NOT the internal issue DTO with fields nulled, because
+        that pattern leaks on the next field someone adds. Never expose reporter
+        identity, exact coordinates or exact address on private property,
+        comment bodies, internal notes, duplicate candidates or AI reasoning.
+
+        `publicCode` is a share handle, not a credential. It is a dense
+        sequential range, so this endpoint is rate limited per IP and must stay
+        that way: a public code in a chat message is a real thing people will
+        paste, and the range behind it is walkable.
+
+        **Title redaction for anonymous reports.** When the reporter chose
+        `disclosure: ANONYMOUS`, `title` is replaced with the category name and
+        `titleRedacted` is true. A citizen's own words are frequently the
+        identifying detail — "my gate is broken, I am at house number 12" — so
+        publishing the title of an anonymous report can deanonymize it just as
+        effectively as publishing a name. The flag is returned so the page can
+        render it honestly rather than presenting redacted text as if it were
+        what was written. Note this reveals that a report is anonymous, which is
+        a far smaller disclosure than revealing who wrote it.
+
+        Rate limited to 60 requests per minute per IP.
+      operationId: getPublicIssue
+      x-required-roles: []
+      security: []
+      responses:
+        '200':
+          description: A redacted public view of the issue
+          headers:
+            X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+            X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+            X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+            X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PublicIssue' }
+        '404':
+          description: No such public code
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  # ===========================================================================
+  # NOTIFICATIONS
+  # ===========================================================================
+  /notifications:
+    get:
+      tags: [notifications]
+      summary: List my notifications, unread first
+      operationId: listNotifications
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/SizeParam'
+        - name: unreadOnly
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: A page of notifications
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /notifications/read-all:
+    post:
+      tags: [notifications]
+      summary: Mark all my notifications as read
+      operationId: markAllNotificationsRead
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '204': { description: Done }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /notifications/{notificationId}/read:
+    parameters:
+      - name: notificationId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [notifications]
+      summary: Mark one notification as read
+      operationId: markNotificationRead
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '204': { description: Done }
+        '404':
+          description: Not found, or not this caller's notification
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  # ===========================================================================
+  # DASHBOARD
+  # ===========================================================================
+  /dashboard:
+    get:
+      tags: [dashboard]
+      summary: Role-specific aggregate
+      description: |
+        One endpoint, shape varies by role: a citizen gets a small personal
+        summary, an officer a workload summary, a manager a department summary
+        including the SLA overdue queue count, an admin the system-wide view.
+
+        Cached in Redis for 60 seconds. If Redis is unavailable this endpoint
+        still serves from the database — staleness is acceptable, failure is
+        not.
+      operationId: getDashboard
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '200':
+          description: An aggregate appropriate to the caller's role
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dashboard' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ===========================================================================
+  # REFERENCE DATA
+  # ===========================================================================
+  /reference/categories:
+    get:
+      tags: [reference]
+      summary: List issue categories
+      description: |
+        Public taxonomy of what can be reported, used to populate the report
+        form. Flattened parent-child, ordered for display, cached 1 hour.
+
+        Only `active: true` categories are returned. A retired category
+        disappears from the form but keeps its historical issues, which is why
+        deactivation is a flag and never a delete.
+
+        The list always includes the `OTHER` category. It is what a citizen
+        picks when the taxonomy does not cover their problem, and selecting it
+        makes `proposedCategoryText` required — see `IssueCreateForm`. Nothing
+        is created automatically: the free text is a *proposal* that a manager
+        resolves at triage into an existing category or a newly created one.
+        That keeps the taxonomy admin-governed, which matters because
+        `defaultDepartmentId` drives routing and `SlaPolicy.categoryId` drives
+        deadlines — a category minted from raw citizen text would arrive with
+        neither.
+      operationId: listReferenceCategories
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '200':
+          description: Active categories
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Category' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /reference/departments:
+    get:
+      tags: [reference]
+      summary: List departments
+      description: |
+        Which department handles what is public information, so this is open to
+        any authenticated caller. It is not a user list: names, contact details
+        and staff counts of a department are not exposed here.
+
+        Only `active: true` departments are returned. A department is
+        deactivated rather than deleted, and deactivation is refused outright
+        while it still has open issues — see `PUT /admin/departments/{id}`.
+      operationId: listReferenceDepartments
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      responses:
+        '200':
+          description: Active departments
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Department' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ===========================================================================
+  # DEVICES (wired in P5, contract frozen now)
+  # ===========================================================================
+  /devices/register:
+    post:
+      tags: [devices]
+      summary: Register a push token
+      description: |
+        Built and deployed in P1 so that mobile launch is a configuration change
+        rather than a migration. The row is stored; nothing is dispatched yet.
+      operationId: registerDevice
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, platform]
+              properties:
+                token: { type: string, maxLength: 500 }
+                platform: { $ref: '#/components/schemas/DevicePlatform' }
+      responses:
+        '204': { description: Registered }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /devices/unregister:
+    post:
+      tags: [devices]
+      summary: Unregister a push token
+      operationId: unregisterDevice
+      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, maxLength: 500 }
+      responses:
+        '204': { description: Unregistered }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ===========================================================================
+  # ADMIN
+  # ===========================================================================
+  /admin/users:
+    get:
+      tags: [admin]
+      summary: List users
+      operationId: listUsers
+      x-required-roles: [ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/SizeParam'
+        - name: role
+          in: query
+          schema: { $ref: '#/components/schemas/Role' }
+        - name: departmentId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/UserStatus' }
+      responses:
+        '200':
+          description: A page of users. Password hashes are never present in any user DTO.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [admin]
+      summary: Create a staff account
+      description: Staff accounts are created here, never by self-registration, so that role and department are always assigned deliberately.
+      operationId: createUser
+      x-required-roles: [ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateUserRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/users/{userId}/role:
+    parameters:
+      - $ref: '#/components/parameters/UserIdPath'
+    put:
+      tags: [admin]
+      summary: Change a user's role
+      description: Admin-only and audited. Never settable through any self-service profile endpoint.
+      operationId: changeUserRole
+      x-required-roles: [ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: '#/components/schemas/Role' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /admin/users/{userId}/status:
+    parameters:
+      - $ref: '#/components/parameters/UserIdPath'
+    put:
+      tags: [admin]
+      summary: Enable or disable a user
+      description: |
+        Disabling, never deleting — deleting a user would break the audit trail
+        of every issue they ever touched. This is also the abuse control for a
+        citizen who repeatedly submits spam.
+      operationId: changeUserStatus
+      x-required-roles: [ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/UserStatus' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /admin/departments:
+    get:
+      tags: [admin]
+      summary: List departments
+      operationId: listDepartments
+      x-required-roles: [ADMIN]
+      responses:
+        '200':
+          description: Departments
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Department' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [admin]
+      summary: Create a department
+      operationId: createDepartment
+      x-required-roles: [ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DepartmentRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Department' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /admin/departments/{departmentId}:
+    parameters:
+      - name: departmentId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [admin]
+      summary: Update a department
+      description: |
+        Setting `active: false` retires the department: it disappears from
+        `/reference/departments` and can no longer be assigned, but every issue
+        already routed to it keeps its history and stays readable. Deletion is
+        never offered, for the same reason issues are never deleted.
+
+        Deactivation is **refused with 409 DEPARTMENT_HAS_OPEN_ISSUES** while
+        any issue in the department is still open (SUBMITTED through
+        REOPENED, or awaiting confirmation). Retiring a department that is
+        sitting on a backlog silently strands those reports, and that is exactly
+        the failure mode the citizen-facing escalation exists to prevent. Move
+        or resolve the open work first.
+      operationId: updateDepartment
+      x-required-roles: [ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DepartmentRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Department' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such department
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: DEPARTMENT_HAS_OPEN_ISSUES
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /admin/categories:
+    get:
+      tags: [admin]
+      summary: List categories
+      operationId: listCategories
+      x-required-roles: [ADMIN]
+      responses:
+        '200':
+          description: Categories
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Category' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [admin]
+      summary: Create a category
+      operationId: createCategory
+      x-required-roles: [ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Category' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /admin/categories/{categoryId}:
+    parameters:
+      - name: categoryId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [admin]
+      summary: Update a category
+      description: |
+        `code` is immutable once created. It is the stable key that SLA
+        policies, exports and duplicate-detection rules are written against, and
+        changing it would silently repoint all of them; the request ignores a
+        differing `code` on an update rather than rewriting history.
+
+        Setting `active: false` retires the category from the report form while
+        leaving every existing issue categorised and readable. As with
+        departments, deactivation is refused with 409 CATEGORY_HAS_OPEN_ISSUES
+        while open issues still reference it, so a live problem is never
+        orphaned from the taxonomy that routes it.
+      operationId: updateCategory
+      x-required-roles: [ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CategoryRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Category' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: No such category
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+        '409':
+          description: CATEGORY_HAS_OPEN_ISSUES
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  /admin/sla-policies:
+    get:
+      tags: [admin]
+      summary: List SLA policies
+      description: |
+        A policy is either category-specific or a per-priority default
+        (`categoryId: null`). The defaults are what make a brand new category
+        sane without anyone having to configure it.
+      operationId: listSlaPolicies
+      x-required-roles: [ADMIN]
+      responses:
+        '200':
+          description: SLA policies
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SlaPolicy' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin]
+      summary: Create or update an SLA policy
+      description: Upsert keyed on (categoryId, priority). Audited.
+      operationId: upsertSlaPolicy
+      x-required-roles: [ADMIN]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SlaPolicyRequest' }
+      responses:
+        '200':
+          description: Created or updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SlaPolicy' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/audit-logs:
+    get:
+      tags: [admin]
+      summary: Search the audit log
+      description: |
+        The record that answers "the department never actioned my report".
+        Append-only: there is no write, update or delete path for this data.
+      operationId: listAuditLogs
+      x-required-roles: [ADMIN]
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/SizeParam'
+        - name: entityType
+          in: query
+          schema: { type: string, maxLength: 40 }
+        - name: entityId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: A page of audit entries
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditLogPage' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/export/issues.csv:
+    get:
+      tags: [admin]
+      summary: Export issues as CSV
+      description: |
+        Streams a CSV. Admin-only, because it is a bulk read of citizen
+        location data. Row cap enforced server-side regardless of filters.
+      operationId: exportIssues
+      x-required-roles: [ADMIN]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/IssueStatus' }
+          style: form
+          explode: true
+        - name: createdFrom
+          in: query
+          schema: { type: string, format: date-time }
+        - name: createdTo
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: CSV file
+          content:
+            text/csv:
+              schema: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+# =============================================================================
+# COMPONENTS
+# =============================================================================
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Short-lived (15 min) access token from `/auth/login` or `/auth/refresh`.
+        Held in memory by the web client, never in localStorage.
+
+  headers:
+    # Budget headers, emitted on rate-limited *successes* as well as on 429.
+    #
+    # This is the part of the Meta/Instagram model worth copying: their app and
+    # user rolling-window limits are observable through response headers
+    # (`X-App-Usage`, `X-Biz-Account-Usage`) BEFORE a request is rejected, so a
+    # client can grey out a button and an operator can see pressure building.
+    # Instagram's actual numbers are proprietary and unpublished; the mechanism
+    # is not, and it is the mechanism that changes client behaviour.
+    RateLimitLimit:
+      description: Requests permitted in the current window for this bucket.
+      schema: { type: integer }
+    RateLimitRemaining:
+      description: Requests still available in the current window.
+      schema: { type: integer }
+    RateLimitReset:
+      description: Unix seconds at which the current window rolls over.
+      schema: { type: integer }
+    RateLimitBucket:
+      description: |
+        Which bucket answered, e.g. `issue-create:user:9f3c…` or
+        `tracked-comment:iphash:41ab…`. Diagnostic only — the identity portion
+        is a salted hash for IP-keyed buckets, never a raw address, so a client
+        log or a support screenshot cannot deanonymize a reporter.
+      schema: { type: string }
+
+  parameters:
+    IssueIdPath:
+      name: issueId
+      in: path
+      required: true
+      description: Issue UUID. Not the public code — the public code is only for the shareable page.
+      schema: { type: string, format: uuid }
+    MatchIdPath:
+      name: matchId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CommentIdPath:
+      name: commentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TrackingTokenHeader:
+      name: X-Tracking-Token
+      in: header
+      required: true
+      description: |
+        The unguessable token issued in the 201 body of an anonymous report,
+        stored client-side. It authorises access to exactly the issues created
+        with it and nothing else.
+
+        A header rather than a query parameter so the value stays out of access
+        logs, proxy logs and `Referer` headers.
+
+        Failure modes are deliberately asymmetric: a **missing** header is 401
+        UNAUTHENTICATED, but a **present but unrecognised** header is 404, the
+        same answer as an unknown issue id. A caller with a bad token learns
+        nothing about whether anything exists, and the client renders one
+        "this link is not valid" state instead of two.
+      schema: { type: string, pattern: '^trk_[A-Za-z0-9_-]{43}$' }
+    UserIdPath:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PageParam:
+      name: page
+      in: query
+      description: Zero-based.
+      schema: { type: integer, minimum: 0, default: 0 }
+    SizeParam:
+      name: size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Client-generated UUID. Replaying the same key from the same reporter
+        returns the original 201 body rather than creating a second report.
+        This exists so a double-tap or a retry on a flaky connection cannot
+        produce duplicate reports — which would then pollute the duplicate
+        detection built in P2 and P3.
+
+        "The same reporter" means the user id when signed in, and the salted IP
+        hash when anonymous, so one anonymous reporter retrying cannot collide
+        with an unrelated anonymous reporter who happened to generate the same
+        UUID.
+      schema: { type: string, format: uuid, maxLength: 100 }
+
+  responses:
+    BadRequest:
+      description: Validation failure
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Unauthorized:
+      description: Missing, invalid or expired access token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Forbidden:
+      description: The caller's role can never use this endpoint
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    NotFound:
+      description: Not found, or not visible to this caller
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    Conflict:
+      description: INVALID_STATE_TRANSITION
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    RateLimited:
+      description: Rate limit exceeded
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema: { type: integer }
+        X-RateLimit-Limit: { $ref: '#/components/headers/RateLimitLimit' }
+        X-RateLimit-Remaining: { $ref: '#/components/headers/RateLimitRemaining' }
+        X-RateLimit-Reset: { $ref: '#/components/headers/RateLimitReset' }
+        X-RateLimit-Bucket: { $ref: '#/components/headers/RateLimitBucket' }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+    # NOTE: any operation may additionally fail with 500 / code INTERNAL_ERROR
+    # using the same ErrorEnvelope. It is not enumerated per operation because
+    # it carries no operation-specific information.
+    #
+    # Rate limiting is a rolling window held in Redis, and it FAILS OPEN: if
+    # Redis is unavailable the request is served and a warning is logged, because
+    # a cache outage must not reject every report in the city. The cost of that
+    # choice is bounded abuse during an outage, which is strictly better than
+    # total unavailability.
+
+  schemas:
+
+    # ---- enumerations ----
+    IssueStatus:
+      type: string
+      description: |
+        The full lifecycle. `AI_ANALYZING` is a real status — it makes a stuck
+        consumer an alertable condition — but the user interface labels it
+        "Under review" and never shows the raw name. `DUPLICATE` is terminal
+        except for an audited admin correction.
+      enum:
+        - SUBMITTED
+        - AI_ANALYZING
+        - TRIAGED
+        - ASSIGNED
+        - IN_PROGRESS
+        - RESOLVED
+        - CLOSED
+        - REOPENED
+        - REJECTED
+        - DUPLICATE
+        - CANCELLED
+
+    Priority:
+      type: string
+      enum: [LOW, MEDIUM, HIGH, CRITICAL]
+
+    Severity:
+      type: string
+      enum: [LOW, MEDIUM, HIGH, CRITICAL]
+
+    Role:
+      type: string
+      enum: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+
+    UserStatus:
+      type: string
+      enum: [ACTIVE, DISABLED]
+
+    ClientType:
+      type: string
+      description: Selects how the refresh token is delivered. See `/auth/login`.
+      enum: [WEB, MOBILE]
+
+    DevicePlatform:
+      type: string
+      enum: [ANDROID, IOS, WEB]
+
+    DuplicateStatus:
+      type: string
+      enum: [SUGGESTED, CONFIRMED, REJECTED]
+
+    Disclosure:
+      type: string
+      description: |
+        How much of the reporter's identity is attached to the issue. The
+        reporter's explicit choice, recorded on the issue and never inferred.
+        See `POST /issues`.
+      enum: [SHARE_DETAILS, ANONYMOUS]
+
+    SlaState:
+      type: string
+      enum:
+        - WITHIN_SLA
+        - APPROACHING
+        - BREACHED
+        - RESOLVED_WITHIN_SLA
+        - RESOLVED_AFTER_BREACH
+
+    AiRecommendationStatus:
+      type: string
+      description: |
+        PENDING is a stored suggestion awaiting human decision. INVALID is a
+        model output that failed schema or business validation — logged and
+        discarded, never retried indefinitely.
+      enum: [PENDING, ACCEPTED, OVERRIDDEN, REJECTED, INVALID]
+
+    # ---- error ----
+    ErrorEnvelope:
+      type: object
+      description: Every error response in the API uses this shape.
+      required: [timestamp, status, code, message, path, traceId]
+      properties:
+        timestamp: { type: string, format: date-time }
+        status: { type: integer }
+        code:
+          type: string
+          enum:
+            - VALIDATION_ERROR
+            - UNAUTHENTICATED
+            - FORBIDDEN
+            - NOT_FOUND
+            - INVALID_STATE_TRANSITION
+            - OFFICER_NOT_IN_DEPARTMENT
+            - REOPEN_WINDOW_EXPIRED
+            - COMMENT_EDIT_WINDOW_EXPIRED
+            - DEPARTMENT_HAS_OPEN_ISSUES
+            - CATEGORY_HAS_OPEN_ISSUES
+            - RATE_LIMITED
+            - INTERNAL_ERROR
+        message:
+          type: string
+          description: Human-readable. Never contains PII or internals.
+        path: { type: string }
+        traceId:
+          type: string
+          description: |
+            Correlation id. Surfaced in the UI so a citizen can quote it in a
+            support request and it can be matched to server logs directly.
+        details:
+          type: array
+          items: { $ref: '#/components/schemas/FieldError' }
+
+    FieldError:
+      type: object
+      properties:
+        field: { type: string }
+        issue: { type: string }
+
+    # ---- auth ----
+    RegisterRequest:
+      type: object
+      required: [email, password, fullName]
+      properties:
+        email: { type: string, format: email, maxLength: 255 }
+        password: { type: string, minLength: 10, maxLength: 128 }
+        fullName: { type: string, minLength: 2, maxLength: 150 }
+        phone:
+          type: [string, 'null']
+          maxLength: 20
+          description: |
+            Optional, and used only for delivery notifications. Never shown on
+            the public page and never returned by the reference endpoints.
+
+    RegisteredUser:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        fullName: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+
+    LoginRequest:
+      type: object
+      required: [email, password, clientType]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+        clientType: { $ref: '#/components/schemas/ClientType' }
+
+    LoginResponse:
+      type: object
+      required: [accessToken, expiresIn, clientType, user]
+      properties:
+        accessToken: { type: string }
+        refreshToken:
+          type: [string, 'null']
+          description: Present only when `clientType` is MOBILE. For WEB it is an HttpOnly cookie.
+        expiresIn: { type: integer, description: Access token lifetime in seconds. }
+        clientType: { $ref: '#/components/schemas/ClientType' }
+        user: { $ref: '#/components/schemas/CurrentUser' }
+
+    RefreshRequest:
+      type: object
+      description: Required for MOBILE, ignored for WEB.
+      properties:
+        refreshToken: { type: string }
+
+    TokenRefreshResponse:
+      type: object
+      required: [accessToken, expiresIn]
+      properties:
+        accessToken: { type: string }
+        refreshToken:
+          type: [string, 'null']
+          description: The rotated token. Present for MOBILE; set as a cookie for WEB.
+        expiresIn: { type: integer }
+
+    CurrentUser:
+      type: object
+      description: The caller's identity and what the UI needs to route and gate.
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        fullName: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        departmentId: { type: [string, 'null'], format: uuid }
+        departmentName: { type: [string, 'null'] }
+
+    # ---- issue ----
+    IssueCreateForm:
+      type: object
+      description: |
+        Coordinates are the primary location input on every device, not a
+        map click. The map is a refinement, never the only path — requiring a
+        pin on a phone is how a reporting flow loses its user.
+      required: [title, description, latitude, longitude, disclosure]
+      properties:
+        title: { type: string, minLength: 5, maxLength: 200 }
+        description: { type: string, minLength: 10, maxLength: 5000 }
+        disclosure:
+          $ref: '#/components/schemas/Disclosure'
+        categoryId: { type: [string, 'null'], format: uuid }
+        subcategoryId: { type: [string, 'null'], format: uuid }
+        proposedCategoryText:
+          type: [string, 'null']
+          minLength: 3
+          maxLength: 100
+          description: |
+            Required when `categoryId` is the `OTHER` category, and rejected
+            otherwise. The citizen's own words for a problem the taxonomy does
+            not cover.
+
+            This creates nothing. It is stored as a proposal on the issue and
+            surfaced in the manager's triage queue, where a human maps it onto
+            an existing category or creates a new one. The reason for the
+            indirection is that categories are load-bearing — `defaultDepartmentId`
+            routes the issue and `SlaPolicy.categoryId` sets its deadline — so a
+            category minted from raw text would arrive with neither, and the
+            taxonomy would fill up with near-duplicates.
+
+            Aggregating repeated proposals into a promotable category is a P2
+            addition (`category_proposals`), not a P1 one.
+        latitude: { type: number, format: double, minimum: -90, maximum: 90 }
+        longitude: { type: number, format: double, minimum: -180, maximum: 180 }
+        address:
+          type: [string, 'null']
+          maxLength: 300
+          description: Free text. Never used as the authoritative location.
+        photos:
+          type: array
+          maxItems: 3
+          description: Up to 3. Server-side normalization; client-side compression is a courtesy, not a requirement.
+          items: { type: string, format: binary }
+
+    IssueUpdateRequest:
+      type: object
+      description: All fields optional. Only allowed while SUBMITTED or AI_ANALYZING.
+      properties:
+        title: { type: string, minLength: 5, maxLength: 200 }
+        description: { type: string, minLength: 10, maxLength: 5000 }
+        categoryId: { type: [string, 'null'], format: uuid }
+        proposedCategoryText: { type: [string, 'null'], minLength: 3, maxLength: 100 }
+
+    IssueCreateResponse:
+      type: object
+      description: |
+        What the client needs immediately after submitting, and the last chance
+        to capture the tracking token. `trackingToken` is returned exactly once
+        in the life of an anonymous report and cannot be recovered afterwards,
+        so the client must persist it before navigating away or the citizen
+        loses access to the report they just filed.
+      required: [issue, publicShareUrl]
+      properties:
+        issue: { $ref: '#/components/schemas/IssueDetail' }
+        trackingToken:
+          type: [string, 'null']
+          description: |
+            Present only for an anonymous submission. Absent (null) for a
+            signed-in citizen, whose access comes from their session instead.
+            32 random bytes, base64url, prefixed `trk_` — unguessable by
+            construction, and stored server-side only as a hash.
+        publicShareUrl:
+          type: string
+          description: |
+            Absolute URL of the redacted public page. Safe to share with
+            anyone: it carries `publicCode` only, never the tracking token.
+
+    IssueSummary:
+      type: object
+      description: |
+        Deliberately lean — no description body, no comments, no attachments.
+        List payloads are what a citizen on a weak connection pays for.
+      required: [id, publicCode, title, status, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        publicCode: { type: string, example: CIV-100482 }
+        title: { type: string }
+        status: { $ref: '#/components/schemas/IssueStatus' }
+        statusLabel:
+          type: string
+          description: Citizen-facing wording, e.g. AI_ANALYZING renders as "Under review". The UI uses this, never the raw status.
+          example: Under review
+        priority: { $ref: '#/components/schemas/Priority' }
+        categoryName: { type: [string, 'null'] }
+        areaLabel: { type: [string, 'null'] }
+        confirmationCount: { type: integer }
+        photoCount: { type: integer }
+        assignedDepartmentName: { type: [string, 'null'] }
+        disclosure:
+          $ref: '#/components/schemas/Disclosure'
+        proposedCategoryText:
+          type: [string, 'null']
+          maxLength: 100
+          description: |
+            Set only when the reporter picked `OTHER` and described the problem
+            in their own words. Carried on the summary so a triage queue can
+            surface unmapped reports without a detail fetch per row.
+        awaitingConfirmation:
+          type: boolean
+          description: |
+            True when the issue has been RESOLVED for longer than
+            STALE_RESOLVED_DAYS with no citizen confirmation. This is the
+            non-destructive replacement for the removed auto-close: the manager
+            gets a queue, and nothing is ever closed without the citizen.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    IssueDetail:
+      type: object
+      required: [id, publicCode, title, description, status, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        publicCode: { type: string, example: CIV-100482 }
+        title: { type: string }
+        description: { type: string }
+        status: { $ref: '#/components/schemas/IssueStatus' }
+        statusLabel:
+          type: string
+          description: Citizen-facing wording for the current status.
+        priority: { $ref: '#/components/schemas/Priority' }
+        priorityScore:
+          type: integer
+          description: 0-100. Sortable, and the reason the UI can answer "why is this CRITICAL?".
+        priorityBreakdown:
+          type: [object, 'null']
+          description: |
+            The five component contributions to the score, so a disputed
+            priority can be explained rather than argued about.
+          additionalProperties: { type: number }
+        severity: { $ref: '#/components/schemas/Severity' }
+        categoryId: { type: [string, 'null'], format: uuid }
+        categoryName: { type: [string, 'null'] }
+        subcategoryId: { type: [string, 'null'], format: uuid }
+        subcategoryName: { type: [string, 'null'] }
+        proposedCategoryText:
+          type: [string, 'null']
+          maxLength: 100
+          description: The citizen's own wording when no category fitted. Unresolved until a manager acts at triage.
+        disclosure:
+          $ref: '#/components/schemas/Disclosure'
+        latitude: { type: number, format: double }
+        longitude: { type: number, format: double }
+        address: { type: [string, 'null'] }
+        areaLabel: { type: [string, 'null'] }
+        reporterId:
+          type: [string, 'null']
+          format: uuid
+          description: |
+            Null for an anonymous report, and null for callers who may see the
+            issue but not the reporter — e.g. a manager reviewing a citizen's
+            report. Anonymous is stored as a null reporter, not as a sentinel
+            user, so no join or query can accidentally treat it as a real
+            account.
+        reporterDisplayName:
+          type: [string, 'null']
+          description: |
+            Only populated for the reporter themselves and for staff who need to
+            contact them about this specific issue. Never returned publicly.
+            Null when `disclosure` is ANONYMOUS, even for staff — the reporter
+            asked not to be identified, and no internal role is a reason to
+            override that.
+        assignedDepartmentId: { type: [string, 'null'], format: uuid }
+        assignedDepartmentName: { type: [string, 'null'] }
+        assignedOfficerId: { type: [string, 'null'], format: uuid }
+        assignedOfficerName:
+          type: [string, 'null']
+          description: |
+            Deliberately visible to the reporter, anonymous or not. A citizen is
+            entitled to know which officer is handling their report, and it is
+            the single most trust-building field on the screen. Staff internal
+            notes stay internal; a name is not a note.
+        confirmationCount: { type: integer }
+        aiUnavailable:
+          type: boolean
+          description: True when triage fell back to manual because the AI provider failed. Drives the manager-facing banner; meaningless to a citizen.
+        aiSuggestions:
+          type: array
+          description: |
+            Suggestions awaiting a human decision. Always advisory — no field
+            here has been applied automatically except where the confidence
+            threshold was met, and even then the status is TRIAGED, not a
+            decision.
+          items: { $ref: '#/components/schemas/AiSuggestion' }
+        attachments:
+          type: array
+          description: Metadata plus a short-lived signed URL. Never a public URL.
+          items: { $ref: '#/components/schemas/Attachment' }
+        statusHistory:
+          type: array
+          description: Embedded because the detail screen always needs the timeline — one round trip, not three.
+          items: { $ref: '#/components/schemas/StatusHistoryEntry' }
+        sla: { $ref: '#/components/schemas/SlaTracking' }
+        resolutionReport: { $ref: '#/components/schemas/ResolutionReport' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        resolvedAt: { type: [string, 'null'], format: date-time }
+        closedAt: { type: [string, 'null'], format: date-time }
+        reopenWindowEndsAt:
+          type: [string, 'null']
+          format: date-time
+          description: Lets the UI hide the reopen action rather than showing a button that will 422.
+        awaitingConfirmation:
+          type: boolean
+          description: |
+            RESOLVED longer than STALE_RESOLVED_DAYS with no confirmation.
+            Never acted on automatically — see `GET /issues?staleResolvedOnly`.
+
+    TrackedIssueDetail:
+      type: object
+      description: |
+        The anonymous reporter's view of their own issue. An explicit field
+        allowlist, not `IssueDetail` with reporter fields nulled — the
+        distinction is the whole point, because "nulled today" leaks the moment
+        someone adds a field.
+
+        Structurally absent: `reporterId`, `reporterDisplayName`, `address`,
+        exact `latitude`/`longitude`, `aiSuggestions` and every internal note.
+        Present: the assigned officer's name, because the citizen asked for it
+        and it is not private.
+      required: [publicCode, title, status, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        publicCode: { type: string, example: CIV-100482 }
+        title: { type: string }
+        description: { type: string }
+        status: { $ref: '#/components/schemas/IssueStatus' }
+        statusLabel: { type: string }
+        disclosure: { $ref: '#/components/schemas/Disclosure' }
+        priority: { $ref: '#/components/schemas/Priority' }
+        severity: { $ref: '#/components/schemas/Severity' }
+        categoryName: { type: [string, 'null'] }
+        proposedCategoryText: { type: [string, 'null'] }
+        coordinates:
+          type: [object, 'null']
+          description: Rounded to a ~100m grid. The exact location is recorded but withheld, so the citizen's own report cannot be used to locate their home from a screenshot.
+          properties:
+            latitude: { type: number }
+            longitude: { type: number }
+        areaLabel: { type: [string, 'null'] }
+        assignedDepartmentName: { type: [string, 'null'] }
+        assignedOfficerName: { type: [string, 'null'] }
+        confirmationCount: { type: integer }
+        photoCount: { type: integer }
+        statusHistory:
+          type: array
+          description: |
+            Present, and deliberately coarse: status, timestamp and who acted —
+            never a reason, never an internal note. The citizen can follow their
+            own report without reading the department's private deliberation.
+          items: { $ref: '#/components/schemas/StatusHistoryEntry' }
+        resolutionReport:
+          type: [object, 'null']
+          description: |
+            The officer's notes and any AI summary, as written. Notes on a fix
+            are addressed to the person who reported the problem, not to the
+            department.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        resolvedAt: { type: [string, 'null'], format: date-time }
+        closedAt: { type: [string, 'null'], format: date-time }
+        reopenWindowEndsAt: { type: [string, 'null'], format: date-time }
+
+    AiSuggestion:
+      type: object
+      description: |
+        A stored AI recommendation. Carries its model and prompt version so any
+        decision can be reproduced and evaluated later. Never authoritative.
+      properties:
+        id: { type: string, format: uuid }
+        type:
+          type: string
+          enum: [CATEGORY, SEVERITY, DEPARTMENT, DUPLICATE, SUMMARY, MODERATION_FLAG]
+        status: { $ref: '#/components/schemas/AiRecommendationStatus' }
+        payload:
+          type: object
+          description: The validated structured output. Free-form here because its shape depends on `type`.
+          additionalProperties: true
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        model: { type: string }
+        promptVersion: { type: string }
+        reasoning:
+          type: [string, 'null']
+          description: One short sentence. Shown to staff to speed up their decision, never to a citizen.
+        createdAt: { type: string, format: date-time }
+        decidedAt: { type: [string, 'null'], format: date-time }
+        decidedById: { type: [string, 'null'], format: uuid }
+
+    Attachment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [ISSUE_PHOTO, RESOLUTION_EVIDENCE] }
+        contentType: { type: string }
+        sizeBytes: { type: integer }
+        url:
+          type: string
+          description: |
+            Short-lived signed URL (S3_SIGNED_URL_TTL_SECONDS, default 300s),
+            generated on read. The stored form is an object key, never a URL.
+        createdAt: { type: string, format: date-time }
+
+    StatusHistoryEntry:
+      type: object
+      description: Append-only. Exactly one row per accepted transition.
+      properties:
+        id: { type: string, format: uuid }
+        fromStatus: { $ref: '#/components/schemas/IssueStatus' }
+        toStatus: { $ref: '#/components/schemas/IssueStatus' }
+        changedById: { type: [string, 'null'], format: uuid }
+        changedByName: { type: [string, 'null'] }
+        reason: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+
+    SlaTracking:
+      type: [object, 'null']
+      properties:
+        deadline: { type: string, format: date-time }
+        state: { $ref: '#/components/schemas/SlaState' }
+        resolveWithinHours: { type: integer }
+        lastEvaluatedAt: { type: string, format: date-time }
+
+    ResolutionReport:
+      type: [object, 'null']
+      properties:
+        id: { type: string, format: uuid }
+        notes: { type: string }
+        aiSummary:
+          type: [string, 'null']
+          description: |
+            Present from P3. Generated once at resolution; regenerate is a
+            rate-limited manual action.
+
+            Because it is written from the comment thread, editing a PUBLIC
+            comment invalidates it: the cached summary is dropped and flagged
+            `aiSummaryStale`, and the next explicit regenerate request rebuilds
+            it. Editing a comment must never leave a summary describing text
+            that no longer exists.
+        officerId: { type: string, format: uuid }
+        officerName: { type: [string, 'null'] }
+        submittedAt: { type: string, format: date-time }
+
+    Comment:
+      type: object
+      description: |
+        A comment is never overwritten in place. Edits append a
+        `comment_revisions` row, so `revisionCount > 0` with a null `editedAt`
+        is impossible and the UI can always tell the truth about what it is
+        showing.
+      properties:
+        id: { type: string, format: uuid }
+        body:
+          type: string
+          description: Empty string when `deletedAt` is set; the client renders the tombstone, not the text.
+        visibility:
+          type: string
+          enum: [PUBLIC, INTERNAL]
+          description: Server-decided from the caller's role. A client-settable visibility would let a citizen publish an internal note.
+        authorId:
+          type: [string, 'null']
+          format: uuid
+          description: Null for an anonymous reporter's comment. Attributable to the tracking token instead, which is never exposed.
+        authorName: { type: string }
+        authorRole: { $ref: '#/components/schemas/Role' }
+        authorAnonymous: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        editedAt: { type: [string, 'null'], format: date-time }
+        revisionCount: { type: integer }
+        editWindowEndsAt:
+          type: [string, 'null']
+          format: date-time
+          description: Null once the window has passed or the caller is not the author, so the UI hides the edit action rather than showing a button that will 422.
+        deletedAt: { type: [string, 'null'], format: date-time }
+
+    CommentRevision:
+      type: object
+      description: Immutable. One row per superseded version of a comment's text.
+      properties:
+        id: { type: string, format: uuid }
+        commentId: { type: string, format: uuid }
+        body: { type: string }
+        editedById: { type: [string, 'null'], format: uuid }
+        createdAt: { type: string, format: date-time }
+
+    CommentCreateRequest:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 5000 }
+
+    CommentUpdateRequest:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 5000 }
+
+    AssignRequest:
+      type: object
+      required: [officerId]
+      properties:
+        officerId: { type: string, format: uuid }
+        note: { type: [string, 'null'], maxLength: 1000 }
+
+    StatusChangeRequest:
+      type: object
+      required: [targetStatus]
+      properties:
+        targetStatus: { $ref: '#/components/schemas/IssueStatus' }
+        reason:
+          type: [string, 'null']
+          maxLength: 1000
+          description: Required for REJECTED, REOPENED and CANCELLED.
+
+    ResolveForm:
+      type: object
+      required: [notes]
+      properties:
+        notes:
+          type: string
+          minLength: 10
+          maxLength: 5000
+          description: Required. This becomes the officer's official account of the work done.
+        evidence:
+          type: array
+          description: Recommended but not mandatory — a buried water main cannot be photographed.
+          items: { type: string, format: binary }
+
+    DuplicateMatch:
+      type: object
+      description: |
+        A suggestion with its evidence attached: similarity and distance
+        together. A manager judging a duplicate needs both, because two
+        identical descriptions 400m apart are not the same problem.
+      properties:
+        id: { type: string, format: uuid }
+        issueId: { type: string, format: uuid }
+        issuePublicCode: { type: string }
+        candidateIssueId: { type: string, format: uuid }
+        candidatePublicCode: { type: string }
+        candidateTitle: { type: string }
+        candidateStatus: { $ref: '#/components/schemas/IssueStatus' }
+        similarityScore: { type: number, minimum: 0, maximum: 1 }
+        distanceMeters: { type: number }
+        detectionMethod:
+          type: string
+          enum: [RULE_BASED, SEMANTIC]
+          description: |
+            RULE_BASED is the P2 category + 150m + open-status rule. SEMANTIC is
+            P3 embedding similarity. Surfaced so a manager can judge a weak
+            match differently from a strong one.
+        status: { $ref: '#/components/schemas/DuplicateStatus' }
+        reviewedById: { type: [string, 'null'], format: uuid }
+        reviewedAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    PublicIssue:
+      type: object
+      description: |
+        The only unauthenticated issue representation. An explicit field
+        allowlist, not the internal DTO with fields nulled. A test asserts
+        this shape contains no PII — the allowlist is the mechanism, and the
+        test is what keeps it honest as fields are added elsewhere.
+      required: [publicCode, title, status, statusLabel, submittedAt]
+      properties:
+        publicCode: { type: string, example: CIV-100482 }
+        title: { type: string }
+        titleRedacted:
+          type: boolean
+          description: |
+            True when `title` has been replaced with the category name because
+            the reporter chose `disclosure: ANONYMOUS`. Sent so the page can say
+            so, instead of presenting a substituted title as though it were
+            what the citizen wrote.
+        categoryName: { type: [string, 'null'] }
+        status: { $ref: '#/components/schemas/IssueStatus' }
+        statusLabel: { type: string }
+        priority: { $ref: '#/components/schemas/Priority' }
+        confirmationCount: { type: integer }
+        photoCount: { type: integer }
+        areaLabel: { type: [string, 'null'] }
+        coordinates:
+          type: [object, 'null']
+          description: Rounded to a ~100m grid. Never the submitted coordinates.
+          properties:
+            latitude: { type: number }
+            longitude: { type: number }
+        submittedAt: { type: string, format: date-time }
+        resolvedAt: { type: [string, 'null'], format: date-time }
+        closedAt: { type: [string, 'null'], format: date-time }
+
+    Notification:
+      type: object
+      description: |
+        One row per authenticated recipient. Two rules about what does *not*
+        appear here:
+
+        - **No event per confirmation.** A citizen confirming a fix, or twenty
+          citizens confirming the same fix, is one thing worth telling the
+          reporter once — and the reporter sees the live `confirmationCount` on
+          their own issue instead. A notification per confirmation trains people
+          to ignore the channel that matters.
+        - **Nothing for an anonymous report.** There is no account to deliver
+          to, and inventing one would undo the anonymity. An anonymous reporter
+          reads status from `/tracked/**` on demand.
+
+        Anonymous reports are therefore not a notification special case in the
+        dispatch code; they simply never enqueue.
+      properties:
+        id: { type: string, format: uuid }
+        type:
+          type: string
+          description: |
+            Stable event name the client switches on, e.g. ISSUE_ASSIGNED,
+            ISSUE_RESOLVED, SLA_BREACHED, COMMENT_EDITED_BY_MODERATOR.
+          example: ISSUE_RESOLVED
+        channel:
+          type: string
+          enum: [IN_APP, EMAIL, PUSH]
+          description: First-class from day one so push needs no migration later. Only IN_APP is wired until P5.
+        title: { type: string }
+        body: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+          description: Typed context, e.g. `{ issueId, publicCode }` for deep-linking.
+        read: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    Dashboard:
+      type: object
+      description: |
+        Role-specific. Sections the caller's role does not get are omitted
+        rather than returned as null, so the client never has to guess whether
+        a missing section means "not applicable" or "failed".
+      properties:
+        role: { $ref: '#/components/schemas/Role' }
+        scope: { type: string, description: "e.g. Department: Water Supply" }
+        totalOpen: { type: integer }
+        byStatus:
+          type: object
+          description: Count per status.
+          additionalProperties: { type: integer }
+        byPriority:
+          type: object
+          additionalProperties: { type: integer }
+        slaBreachedCount:
+          type: integer
+          description: Manager and admin only. The number that actually drives a department's day.
+        slaComplianceRate:
+          type: number
+          description: Manager and admin only. Resolved within SLA / total resolved.
+        medianResolutionHours:
+          type: [number, 'null']
+          description: The figure a ward officer is asked for most often.
+        myAssignedCount:
+          type: integer
+          description: Officer only.
+        myOpenReports:
+          type: integer
+          description: Citizen only.
+        generatedAt: { type: string, format: date-time }
+
+    # ---- reference & admin ----
+    Category:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        code: { type: string, example: POTHOLE }
+        parentCategoryId: { type: [string, 'null'], format: uuid }
+        defaultDepartmentId: { type: [string, 'null'], format: uuid }
+        active:
+          type: boolean
+          description: |
+            False means retired: absent from the report form, unselectable for
+            new issues, but still carried by every issue that already uses it.
+            A flag, never a delete, because history has to stay readable.
+        subcategories:
+          type: array
+          description: Flattened in the response so the report form does not have to build a tree.
+          items: { $ref: '#/components/schemas/Category' }
+
+    CategoryRequest:
+      type: object
+      required: [name, code]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 100 }
+        code: { type: string, pattern: '^[A-Z0-9_]+$', maxLength: 40 }
+        parentCategoryId: { type: [string, 'null'], format: uuid }
+        defaultDepartmentId: { type: [string, 'null'], format: uuid }
+        active: { type: boolean, default: true }
+
+    Department:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        code: { type: string }
+        description: { type: [string, 'null'] }
+        active:
+          type: boolean
+          description: |
+            False means retired: gone from the reference list and unassignable,
+            but every issue already routed to it keeps its history. Cannot be
+            set false while the department holds open issues.
+        staffCount:
+          type: integer
+          description: Count of active staff. Present on the admin endpoint only, never on the reference one.
+
+    DepartmentRequest:
+      type: object
+      required: [name, code]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 120 }
+        code: { type: string, pattern: '^[A-Z0-9_]+$', maxLength: 20 }
+        description: { type: [string, 'null'] }
+        active: { type: boolean, default: true }
+
+    SlaPolicy:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        categoryId:
+          type: [string, 'null']
+          format: uuid
+          description: Null means this is the default for the priority band. The four defaults are what make a new category sane without configuration.
+        categoryName: { type: [string, 'null'] }
+        priority: { $ref: '#/components/schemas/Priority' }
+        resolveWithinHours: { type: integer, minimum: 1 }
+
+    SlaPolicyRequest:
+      type: object
+      required: [priority, resolveWithinHours]
+      properties:
+        categoryId: { type: [string, 'null'], format: uuid }
+        priority: { $ref: '#/components/schemas/Priority' }
+        resolveWithinHours: { type: integer, minimum: 1, maximum: 8760 }
+
+    User:
+      type: object
+      description: Never contains a password hash under any circumstance.
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        fullName: { type: string }
+        phone: { type: [string, 'null'] }
+        role: { $ref: '#/components/schemas/Role' }
+        departmentId: { type: [string, 'null'], format: uuid }
+        departmentName: { type: [string, 'null'] }
+        status: { $ref: '#/components/schemas/UserStatus' }
+        createdAt: { type: string, format: date-time }
+
+    CreateUserRequest:
+      type: object
+      required: [email, password, fullName, role]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 10, maxLength: 128 }
+        fullName: { type: string, minLength: 2, maxLength: 150 }
+        role: { $ref: '#/components/schemas/Role' }
+        departmentId:
+          type: [string, 'null']
+          format: uuid
+          description: Required for FIELD_OFFICER and DEPARTMENT_MANAGER.
+
+    AuditLog:
+      type: object
+      description: Append-only. The record that answers "the department never actioned my report".
+      properties:
+        id: { type: string, format: uuid }
+        actorId: { type: [string, 'null'], format: uuid }
+        actorName: { type: [string, 'null'] }
+        action:
+          type: string
+          description: 'e.g. ISSUE_CREATED, ISSUE_ASSIGNED, ISSUE_STATUS_CHANGED, USER_ROLE_CHANGED, SLA_POLICY_UPDATED, PRIORITY_DOWNGRADED'
+        entityType: { type: string }
+        entityId: { type: string, format: uuid }
+        oldValue: { type: [object, 'null'], additionalProperties: true }
+        newValue: { type: [object, 'null'], additionalProperties: true }
+        ipAddress:
+          type: [string, 'null']
+          description: |
+            Null for every action taken on an anonymous report. A reporter's IP
+            is the only identity such a report has, so storing it in an
+            admin-readable table would leave the anonymity one records request
+            away. For anonymous traffic a salted, rotating hash is kept in the
+            abuse-detection store for the abuse window and nowhere else.
+        createdAt: { type: string, format: date-time }
+
+    # ---- paginated envelopes ----
+    # The four page schemas below are intentionally self-contained rather than
+    # composed from a shared PageMeta via allOf: generated clients handle a
+    # flat object more reliably than an allOf merge.
+    IssueSummaryPage:
+      type: object
+      required: [content, page, size, totalElements, totalPages]
+      properties:
+        content:
+          type: array
+          items: { $ref: '#/components/schemas/IssueSummary' }
+        page: { type: integer }
+        size: { type: integer }
+        totalElements: { type: integer }
+        totalPages: { type: integer }
+        hasNext: { type: boolean }
+
+    NotificationPage:
+      type: object
+      required: [content, page, size, totalElements, totalPages]
+      properties:
+        content:
+          type: array
+          items: { $ref: '#/components/schemas/Notification' }
+        page: { type: integer }
+        size: { type: integer }
+        totalElements: { type: integer }
+        totalPages: { type: integer }
+        hasNext: { type: boolean }
+
+    UserPage:
+      type: object
+      required: [content, page, size, totalElements, totalPages]
+      properties:
+        content:
+          type: array
+          items: { $ref: '#/components/schemas/User' }
+        page: { type: integer }
+        size: { type: integer }
+        totalElements: { type: integer }
+        totalPages: { type: integer }
+        hasNext: { type: boolean }
+
+    AuditLogPage:
+      type: object
+      required: [content, page, size, totalElements, totalPages]
+      properties:
+        content:
+          type: array
+          items: { $ref: '#/components/schemas/AuditLog' }
+        page: { type: integer }
+        size: { type: integer }
+        totalElements: { type: integer }
+        totalPages: { type: integer }
+        hasNext: { type: boolean }

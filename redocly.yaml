@@ -1,0 +1,21 @@
+# Redocly configuration for the CivicLens API contract.
+#
+# Run from the repository root:
+#   npx @redocly/cli lint api/openapi/civiclens-v1.yaml
+#
+# This is the first thing CI runs against the contract. A validation error here
+# fails the build, so the contract can never be committed in a state the client
+# generator would choke on.
+
+extends:
+  - recommended
+
+rules:
+  # The contract legitimately targets http://localhost:8080 for local
+  # development. That is the environment this file is written for.
+  no-server-example.com: off
+
+  # The repository carries no open-source licence, so there is no SPDX
+  # identifier or licence URL to declare.
+  info-license-strict: off
+  info-license: off

@@ -26,6 +26,8 @@
 10. **Cut, don't half-ship.** A missing feature beats a broken one. NL analytics is cut first.
 11. **Idempotent consumers.** Dedupe by message id; duplicate delivery is a no-op.
 12. **Accessible and low-bandwidth.** WCAG 2.1 AA on citizen flows, works on a low-end Android on throttled 3G.
+13. **Anonymity is structural, not a flag.** A report is identified by *either* a user id *or* an unguessable tracking token — never both, and never by a sequential public code. Where a reporter asked for anonymity, the response shapes are built from an explicit field allowlist that has no reporter field to null out, and the reporter's IP is never written to an admin-readable table.
+14. **Corrections are additive, never destructive.** A comment is edited by appending a revision and deleting by tombstoning, not by overwriting. An official record that can be silently rewritten cannot answer the question the audit trail exists to answer.
 
 ---
 
@@ -74,6 +76,26 @@ Four roles, as in the architecture spec and BUILD.md. `users.role` is a `VARCHAR
 - Role changes are admin-only, audited, and never settable through self-service profile update.
 - Users are **soft-disabled**, never deleted, so audit history stays intact.
 - P1 exercises `CITIZEN` + `DEPARTMENT_MANAGER` (a manager with a null `department_id` doing manual triage). The officer split activates in P2 when departments exist.
+- **The `@PreAuthorize` rule has one documented exception.** `POST /issues` and the whole `/tracked/**` tree carry an empty `x-required-roles` and are authorized in the service layer, because `@PreAuthorize` cannot express "anonymous **or** CITIZEN". Every other operation's annotation is still asserted by a test against the contract.
+
+### 3.1 Reporter identity, disclosure and anonymous reporting
+
+A report has exactly one identity, and which one it is, is the reporter's explicit choice at submission time.
+
+| Disclosure | Identity stored | Reachable by | Staff see |
+|---|---|---|---|
+| `SHARE_DETAILS` | `reporter_id` | the citizen's session, and staff in scope | reporter name and contact |
+| `ANONYMOUS` | **no reporter id at all** — a hashed tracking token | the tracking token only | "anonymous citizen" |
+
+Rules, each of which exists because the obvious alternative leaks:
+
+- **`public_code` is never a credential.** It is `'CIV-' || nextval(...)` from `100001`, a dense walkable range, and it is handed out in share links and printed on screens. A sequential public identifier in front of an unauthenticated read endpoint is an enumeration primitive, so the public endpoint stays IP-rate-limited and the private one is keyed on something unguessable.
+- **The tracking token is 32 random bytes**, base64url, prefixed `trk_`. Returned exactly once, in the 201 body. Stored only as a hash. Scoped to the issues created with it, so possession of one token grants nothing else. Presented in the `X-Tracking-Token` **header** — never a query parameter, which would land it in access logs and `Referer` headers.
+- **A lost token is a lost report.** There is no recovery, no re-issue and no "email me a link". That is the price of an identity the platform does not hold, and pretending otherwise would require holding exactly the identifier we promised not to.
+- **Anonymity extends to the IP.** A reporter's IP is the only identity an anonymous report has, so writing it to `audit_logs` would leave the anonymity one records request away. Anonymous traffic is keyed on a **salted, rotating** IP hash kept in the abuse store for the abuse window and nowhere else; `audit_logs.ip_address` is null for any action on an anonymous issue.
+- **Anonymous reports get no notifications.** A notification needs an account to arrive in. The anonymous reporter reads status on demand from `/tracked/**` instead.
+- **Anonymous status history is coarse**: status, timestamp, actor — never a reason, never an internal note. They can follow their own report without reading the department's private deliberation.
+- **The public page redacts the title of an anonymous report** to the category name, and says so via `titleRedacted`. A citizen's own words are frequently the identifying detail ("my gate is broken, I am at house number 12"), so publishing the title can deanonymize the report as effectively as publishing a name would.
 
 ---
 
@@ -92,8 +114,9 @@ Eleven statuses, single `IssueStateMachine` component driven by a `Map<IssueStat
 | `ASSIGNED` | `IN_PROGRESS` | FIELD_OFFICER (assignee only) | officer accepted assignment | `ISSUE_IN_PROGRESS` | citizen |
 | `ASSIGNED` | `TRIAGED` | DEPARTMENT_MANAGER | reassignment / officer unresponsive | `ISSUE_UNASSIGNED` | previous officer |
 | `IN_PROGRESS` | `RESOLVED` | FIELD_OFFICER (assignee only) | resolution notes required; ≥1 evidence attachment recommended | `ISSUE_RESOLVED` | citizen (confirm/reopen prompt) |
-| `RESOLVED` | `CLOSED` | CITIZEN (reporter) or SYSTEM (auto-close) | citizen confirms, or auto-close window elapses | `ISSUE_CLOSED` | none |
+| `RESOLVED` | `CLOSED` | CITIZEN (reporter) | the citizen confirms the fix. **The only path to `CLOSED`** | `ISSUE_CLOSED` | none |
 | `RESOLVED` | `REOPENED` | CITIZEN (reporter) | within reopen window (14 days, configurable), reason required | `ISSUE_REOPENED` | manager + officer |
+| `CLOSED` | `REOPENED` | CITIZEN (reporter) | same window. With auto-close gone this is now the **only** thing protecting a disputed fix | `ISSUE_REOPENED` | manager + officer |
 | `REOPENED` | `ASSIGNED` | DEPARTMENT_MANAGER | same as `TRIAGED → ASSIGNED` | `ISSUE_REASSIGNED` | officer |
 | any active state | `CANCELLED` | CITIZEN (reporter, only before `ASSIGNED`) or ADMIN | reason required | `ISSUE_CANCELLED` | none |
 
@@ -102,7 +125,7 @@ Eleven statuses, single `IssueStateMachine` component driven by a `Map<IssueStat
 **Resolutions to ambiguities found while reconciling:**
 - `ACKNOWLEDGED` (PLAN) is dropped. `TRIAGED` covers it; a second state meaning "someone looked at it" adds no audit value.
 - `AI_ANALYZING` survives as a real status — it makes a stuck consumer an alertable condition — but the citizen UI labels it **"Under review"** and never shows the raw status name.
-- **Auto-close must not destroy the right to reopen.** `REOPENED` is therefore reachable from `CLOSED` as well as `RESOLVED`, within the same 14-day window, reporter only. Otherwise the N-day auto-close silently removes a citizen's right to dispute a fix. The auto-close window is therefore configured **longer** than the reopen window.
+- **No auto-close. Nothing closes on a timer.** An authority that fixes a report and then never hears back from the citizen is a real operational problem, and auto-close "solved" it by silently destroying the citizen's right to dispute a fix — and, in practice, by teaching departments that reports disappear on their own. The problem is real, so it is addressed with a **stale-resolution queue** instead: `GET /issues?staleResolvedOnly=true` lists issues `RESOLVED` for more than `STALE_RESOLVED_DAYS` with no confirmation, and a manager chases the citizen. Non-destructive, and it puts a human back in the loop, which is the whole point.
 - Staff (`DEPARTMENT_MANAGER`, `ADMIN`) may also move `RESOLVED → IN_PROGRESS` for a fix that did not hold, with a required reason; it is audited as a distinct action from a citizen reopen, because the accountability story differs.
 - `DUPLICATE` is terminal except via admin correction, which is audited.
 
@@ -169,25 +192,47 @@ Access token 15 min, refresh 7 days, **rotated on every use**: the prior row is 
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/issues` | CITIZEN | `multipart/form-data`: title, description, categoryId?, latitude, longitude, address?, photos[] (max 3). Header `Idempotency-Key: <uuid>`. Replay returns the **original 201 body**, not an error |
-| GET | `/issues` | any, scoped | Filters: status, category, priority, department, page, size. Citizen→own, officer→assigned, manager→department, admin→all |
+| POST | `/issues` | **optional** — session *or* anonymous | `multipart/form-data`: title, description, disclosure, categoryId?, proposedCategoryText?, latitude, longitude, address?, photos[] (max 3). Header `Idempotency-Key: <uuid>`. Replay returns the **original 201 body** (including the original tracking token), not an error. A present-but-invalid `Authorization` header is 401; a missing one is the anonymous path |
+| GET | `/issues` | any, scoped | Filters: status, category, priority, department, createdFrom/To, `staleResolvedOnly`, page, size. Citizen→own, officer→assigned, manager→department, admin→all. Free-text `q` is **not** here in P1 — it arrives in P2 and only ever inherits this scoping |
 | GET | `/issues/mine` | CITIZEN | Convenience list; same shape |
-| GET | `/issues/{id}` | scoped | 404 if not visible — never 403 |
-| PUT | `/issues/{id}` | CITIZEN (reporter) | Only while `SUBMITTED` or `AI_ANALYZING`: title?, description?, categoryId? |
-| POST | `/issues/{id}/comments` | scoped participants | 201 |
+| GET | `/issues/{id}` | scoped | 404 if not visible — never 403. A citizen's own anonymous reports are **not** reachable here; they use `/tracked/**` |
+| PUT | `/issues/{id}` | CITIZEN (reporter) | Only while `SUBMITTED` or `AI_ANALYZING`: title?, description?, categoryId?, proposedCategoryText? |
+| GET/POST | `/issues/{id}/comments` | scoped participants | 201. Visibility is server-decided; `INTERNAL` never reaches a citizen |
+| PUT | `/issues/{id}/comments/{id}` | author only, ≤ `COMMENT_EDIT_WINDOW_MINUTES` | Appends a `comment_revisions` row, never overwrites. 422 `COMMENT_EDIT_WINDOW_EXPIRED`. Invalidates a cached `ai_summary` |
+| DELETE | `/issues/{id}/comments/{id}` | author (≤ window) or ADMIN moderation | Soft delete + tombstone. ADMIN path requires a reason, is audited, and skips the window |
+| GET | `/issues/{id}/comments/{id}/revisions` | anyone who can see the comment | Prior versions. Staff-only in practice |
 | POST | `/issues/{id}/assign` | DEPARTMENT_MANAGER (own dept) | 422 `OFFICER_NOT_IN_DEPARTMENT` |
-| POST | `/issues/{id}/status` | per transition matrix | 409 on invalid |
+| POST | `/issues/{id}/status` | per transition matrix | 409 on invalid. No SYSTEM actor exists on any transition |
 | POST | `/issues/{id}/transition` | staff | Thin generic alias over `/status` for bulk queue actions |
 | POST | `/issues/{id}/resolve` | FIELD_OFFICER (assignee) | `multipart`: notes, evidence[] |
-| POST | `/issues/{id}/confirm` | CITIZEN (reporter) | `RESOLVED → CLOSED` |
-| POST | `/issues/{id}/reopen` | CITIZEN (reporter) | 422 `REOPEN_WINDOW_EXPIRED` |
+| POST | `/issues/{id}/confirm` | CITIZEN (reporter) | `RESOLVED → CLOSED`. The only transition into `CLOSED` |
+| POST | `/issues/{id}/reopen` | CITIZEN (reporter) | From `RESOLVED` **or** `CLOSED`. 422 `REOPEN_WINDOW_EXPIRED` |
 | GET | `/issues/{id}/duplicates` | DEPARTMENT_MANAGER | 200 |
 | POST | `/duplicates/{id}/confirm` · `/reject` | DEPARTMENT_MANAGER | 200 |
+
+### 7.2a Tracked — the anonymous reporter's own surface
+
+A **separate tree**, not extra credentials on the `/issues` paths. Two reasons: the `x-required-roles` drift assertion stays meaningful (every operation here is unauthenticated and checked in the service layer, rather than five role-scoped endpoints quietly becoming bearer-token ones), and it is obvious at a glance that reporter identity is structurally absent rather than merely omitted.
+
+All seven operations require the `X-Tracking-Token` header and carry `x-required-roles: []`, `security: []`.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/tracked/issues` | Every report created with this token. A shared kiosk accumulates several, so it is a list. **401** if the header is absent, **404** if unrecognised — one "link not valid" state instead of two |
+| GET | `/tracked/issues/{id}` | `TrackedIssueDetail`: an explicit allowlist. No `reporterId`, no `reporterDisplayName`, no `address`, coordinates rounded to ~100 m, no `aiSuggestions`, no internal notes. `assignedOfficerName` **is** included |
+| PUT | `/tracked/issues/{id}` | Edit while `SUBMITTED`/`AI_ANALYZING`, same rules as the signed-in path |
+| GET | `/tracked/issues/{id}/comments` | `INTERNAL` filtered out server-side; a test asserts no `INTERNAL` row is ever returned |
+| POST | `/tracked/issues/{id}/comments` | Always `PUBLIC` — there is no role here for an internal note to contrast with. Author recorded as the anonymous reporter |
+| POST | `/tracked/issues/{id}/confirm` | Closes the report. The only way an anonymous issue reaches `CLOSED`, and nobody closes it for them |
+| POST | `/tracked/issues/{id}/reopen` | Same preconditions and 14-day window; the reason is attributed to the token, never to a user |
+
+All seven are rate limited and IP-keyed, because they are the most abusable surface in the product and have no user id to key on.
 
 ### 7.3 Public, notifications, dashboard, admin, devices
 
 ```
 GET  /public/issues/{publicCode}   unauthenticated, redacted DTO, rate-limited
+GET  /tracked/**                   see §7.2a — anonymous reporter, X-Tracking-Token header
 GET  /notifications?unreadOnly=&page=&size=
 POST /notifications/{id}/read   ·   POST /notifications/read-all
 GET  /dashboard                  role-specific aggregate, Redis-cached 60s
@@ -201,11 +246,17 @@ POST /devices/unregister  { token }                              → 204
 
 **Public DTO allowlist** — a dedicated type with these fields and nothing else. Never the internal DTO with fields nulled:
 
-`publicCode`, `title`, `category`, `status`, `priority` (band), `submittedAt`, `resolvedAt`, `closedAt`, `confirmationCount`, `photoCount`, `coordinates` rounded to a ~100 m grid, `areaLabel`.
+`publicCode`, `title`, `titleRedacted`, `category`, `status`, `priority` (band), `submittedAt`, `resolvedAt`, `closedAt`, `confirmationCount`, `photoCount`, `coordinates` rounded to a ~100 m grid, `areaLabel`.
 
 Never present: reporter name/email/phone, exact coordinates or exact address for issues on private property, free-text comment bodies, internal officer notes, duplicate candidates, AI reasoning, audit data, any other citizen's identity.
 
+`titleRedacted` is true when the reporter chose anonymity, and the page renders the substituted category name *as* a redaction rather than passing it off as what the citizen wrote.
+
 A general open-data API stays **out of scope**. This is one shareable page, not a data feed.
+
+**What is deliberately absent from notifications**, in both cases because the alternative is worse:
+- **No event per confirmation.** A citizen sees a live `confirmationCount` on their own report instead. A notification per confirmation trains people to ignore the one channel that matters.
+- **Nothing for anonymous reports.** They never enqueue; see §3.1.
 
 ### 7.4 Error model
 
@@ -221,20 +272,29 @@ A general open-data API stays **out of scope**. This is one shareable page, not 
 }
 ```
 
-Codes: `VALIDATION_ERROR` (400) · `UNAUTHENTICATED` (401) · `FORBIDDEN` (403, wrong role for the endpoint only) · `NOT_FOUND` (404) · `INVALID_STATE_TRANSITION` (409) · `OFFICER_NOT_IN_DEPARTMENT` (422) · `REOPEN_WINDOW_EXPIRED` (422) · `RATE_LIMITED` (429) · `INTERNAL_ERROR` (500). `AI_UNAVAILABLE` exists internally and **never** surfaces to a citizen-facing response. `DUPLICATE_IDEMPOTENCY_KEY` is not an error — it replays the original success body.
+Codes: `VALIDATION_ERROR` (400) · `UNAUTHENTICATED` (401) · `FORBIDDEN` (403, wrong role for the endpoint only) · `NOT_FOUND` (404) · `INVALID_STATE_TRANSITION` (409) · `OFFICER_NOT_IN_DEPARTMENT` (422) · `REOPEN_WINDOW_EXPIRED` (422) · `COMMENT_EDIT_WINDOW_EXPIRED` (422) · `DEPARTMENT_HAS_OPEN_ISSUES` (409) · `CATEGORY_HAS_OPEN_ISSUES` (409) · `RATE_LIMITED` (429) · `INTERNAL_ERROR` (500). `AI_UNAVAILABLE` exists internally and **never** surfaces to a citizen-facing response. `DUPLICATE_IDEMPOTENCY_KEY` is not an error — it replays the original success body.
 
-### 7.5 Rate limits (Redis sliding window)
+### 7.5 Rate limits
+
+Rolling window in Redis, sorted-set per bucket, TTL'd. The shape follows Meta's documented Graph API model rather than Instagram's numbers, which are proprietary and unpublished: separate **app-level and user-level** windows, both rolling, both *observable before rejection*. What is copied is the mechanism — their `X-App-Usage` / `X-Biz-Account-Usage` headers let a client grey out a button and an operator see pressure building. That is the part that changes client behaviour, and the actual limits below are ours.
 
 | Endpoint | Limit | Key |
 |---|---|---|
 | `POST /auth/login` | 5/min per IP **and** 10/hour per account | both |
 | `POST /auth/register` | 3/hour per IP | IP |
-| `POST /issues` | 10/hour per user | user |
-| `POST /issues/{id}/comments` | 20/hour per user | user |
-| `GET /public/**` | 60/min per IP | IP |
+| `POST /issues` | 10/hour | user id, or salted IP hash when anonymous |
+| `POST /issues/{id}/comments` | 20/hour | user id, or salted IP hash when anonymous |
+| `/tracked/**` | 60/min per IP | salted IP hash — there is no user id to key on |
+| `GET /public/**` | 60/min per IP | salted IP hash |
 | AI-triggering paths | global daily budget, hard stop | global |
 
-These are starting values, not policy I invented — revisit after real traffic.
+Every rate-limited response — **successes included** — carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` and `X-RateLimit-Bucket`; a 429 adds `Retry-After`. The client can therefore disable a submit button on the last allowed request instead of letting a citizen discover the limit by hitting it.
+
+Two rules that follow from anonymity:
+- **Bucket keys hold a salted, rotating IP hash, never a raw address.** A Redis dump or a support screenshot must not deanonymize a reporter, and rotation means the hash is useless for correlating a reporter across a long period.
+- **Which bucket was exhausted goes to metrics, never to the client.** A response that says "your IP is over the limit" is a small but free enumeration aid against a shared address.
+
+**Fails open.** If Redis is unavailable the request is served and a warning logged. A cache outage must not reject every report in the city; bounded abuse during an outage is strictly better than total unavailability.
 
 ---
 
@@ -246,23 +306,30 @@ Flyway, one file per logical change, never edit an applied migration. Every tabl
 
 ### V1 — Report and Track
 
-`departments` · `users` · `refresh_tokens` · `device_tokens` · `categories` · `issues` · `issue_comments` · `issue_attachments` · `issue_status_history` · `resolution_reports`
+`departments` · `users` · `refresh_tokens` · `device_tokens` · `categories` · `issues` · `tracking_tokens` · `issue_comments` · `comment_revisions` · `issue_attachments` · `issue_status_history` · `resolution_reports`
 
 Highlights and deliberate shape:
-- `issues.public_code` = `'CIV-' || nextval('issue_public_code_seq')`, `START 100001`, generated in the service layer. Never `COUNT(*)+1`.
-- `issues.idempotency_key` + `CREATE UNIQUE INDEX ... ON issues(reporter_id, idempotency_key) WHERE idempotency_key IS NOT NULL` — cheap now, a production migration later.
+- `issues.public_code` = `'CIV-' || nextval('issue_public_code_seq')`, `START 100001`, generated in the service layer. Never `COUNT(*)+1`. A share handle, never a credential — see §3.1.
+- `issues.disclosure` ∈ `SHARE_DETAILS` | `ANONYMOUS`, required, never inferred. `issues.reporter_id` is **nullable** and null means anonymous; there is no sentinel "anonymous user" row, so no join or query can mistake anonymity for an account.
+- `tracking_tokens(id, issue_id, token_hash, created_at, last_used_at)` — `token_hash` is a SHA-256 of the token under a server-side pepper; the plaintext is never stored and never recoverable. Multiple rows per reporter, because a shared kiosk legitimately creates several.
+- `issues.ip_hash` — a salted, rotating hash used **only** as a rate-limit and abuse-detection key, TTL'd with the abuse window. `audit_logs.ip_address` stays null for anonymous issues (§3.1).
+- `issues.proposed_category_text VARCHAR(100) NULL` — set when the reporter picks the `OTHER` category. Creates nothing; surfaced in the manager's triage queue. Required when `categoryId` is `OTHER` and rejected otherwise.
+- `issues.idempotency_key` + two partial unique indexes — one on `(reporter_id, idempotency_key)` for signed-in reporters, one on `(ip_hash, idempotency_key)` for anonymous ones. A single `(reporter_id, …)` index cannot work with a nullable reporter, and a shared index on the key alone would let one anonymous citizen's retry collide with an unrelated one.
+- `categories.active BOOLEAN NOT NULL DEFAULT true` and `departments.active BOOLEAN NOT NULL DEFAULT true`. Retired, never deleted. `/reference/*` returns active rows only, and deactivating a department or category that still holds open issues is refused with a 409 rather than silently orphaning live reports.
 - `issues.priority_score INT` + `issues.score_breakdown JSONB` alongside the `priority` band.
 - `issue_attachments.kind` ∈ `ISSUE_PHOTO` (max 3 per issue, enforced in service) | `RESOLUTION_EVIDENCE`; stores `file_key`, **never a public URL**.
+- `issue_comments` gains `edited_at`, `revision_count`, `deleted_at`, `author_id NULL` (an anonymous reporter's comment is attributable to the token, which is never exposed). `comment_revisions(id, comment_id, body, edited_by, created_at)` is **append-only**, one row per superseded version. This is what lets a comment be corrected inside its window without weakening the audit trail — the trail is extended, not punched through.
 - `resolution_reports` is created **without** `ai_summary`; that column is added in V3 when summarization exists. A nullable column would be dead weight in V1 and an `ALTER` in V3 is free.
-- `issue_status_history` and `audit_logs` are **append-only** — no update or delete code path exists, and there is a test asserting it.
+- `issue_status_history` and `audit_logs` are **append-only** — no update or delete code path exists, and there is a test asserting it. `comment_revisions` is held to the same standard.
 - Full `audit_logs` with an `@Aspect` arrives in V2; V1 records transitions in `issue_status_history` (PLAN's explicit design: the audit log replaces the simple history once it exists).
 
 ### V2 — Triage and Workflow
 
-`issue_assignments` · `sla_policies` · `sla_tracking` · `audit_logs` · `issue_confirmations` (`UNIQUE(issue_id, user_id)`) · `notification_outbox` · `notifications` · `processed_messages`
+`issue_assignments` · `sla_policies` · `sla_tracking` · `audit_logs` · `issue_confirmations` (`UNIQUE(issue_id, user_id)`) · `category_proposals` · `notification_outbox` · `notifications` · `processed_messages`
 
 - A user has **one** department via `users.department_id`. PLAN's `staff_departments` join table is dropped — it models multi-department staff, which this product does not need, and a join table in the authorization path is a place for bugs to hide.
 - `notifications.channel` ∈ `IN_APP` | `EMAIL` | `PUSH` from day one. Only `IN_APP` is wired in V2.
+- `category_proposals(id, normalized_text, issue_count, status[OPEN|PROMOTED|DISMISSED], resolved_category_id)` aggregates repeated `proposed_category_text` values so a manager can promote a real problem into a real category instead of merging the same three near-duplicates by hand every week. P1 only stores the text on the issue; this table is what turns a pile of proposals into taxonomy.
 
 ### V3 — AI Recommendation Layer
 
@@ -369,7 +436,7 @@ Envelope: `{ messageId, eventType, occurredAt, payload }`. Publishing happens vi
 |---|---|---|---|
 | Dashboard aggregates | `dash:{role}:{deptId}` | 60 s | time-based; short staleness acceptable |
 | Reference lists | `ref:categories`, `ref:departments` | 1 h | explicit evict on admin write |
-| Rate-limit counters | `rl:{userId}:{endpoint}` | sliding | expires naturally |
+| Rate-limit counters | `rl:{identity}:{endpoint}` where identity is a user id or a salted IP hash | rolling | expires naturally |
 | In-flight AI state | `ai:processing:{issueId}` | 5 min | cleared on completion |
 
 Redis is **never** a system of record. A Redis outage degrades performance, not correctness — rate limiting fails open with a logged warning rather than rejecting every request.
@@ -395,17 +462,20 @@ Angular 22, standalone components, lazy-loaded routes, Signals for local/UI stat
 
 ```
 src/app/
-├── core/        AuthService, TokenStore, AuthInterceptor, ErrorInterceptor, RoleGuard, CorrelationIdInterceptor
-├── shared/      StatusBadge, PriorityBadge, SlaCountdown, FileUploader, CommentThread, StatusTimeline, MapPicker, PublicIssueCard
+├── core/        AuthService, TokenStore, AuthInterceptor, ErrorInterceptor, RoleGuard, CorrelationIdInterceptor, TrackingTokenStore
+├── shared/      StatusBadge, PriorityBadge, SlaCountdown, FileUploader, CommentThread, StatusTimeline, MapPicker, PublicIssueCard, DisclosureChoice
 ├── layouts/     CitizenShell, OfficerShell, ManagerShell, AdminShell
 └── features/
     ├── auth/        login, register
     ├── issues/      report, my-reports, issue-detail, public-issue-detail
+    ├── tracked/     anonymous-reports, tracked-issue-detail — token in localStorage, never a URL
     ├── officer/     assigned, resolve
-    ├── manager/     queue, assignment, sla-monitor, duplicate-review, analytics
+    ├── manager/     queue, assignment, sla-monitor, duplicate-review, category-proposals, analytics
     ├── admin/       users, departments, categories, sla-config, audit-logs
     └── notifications/
 ```
+
+`TrackingTokenStore` keeps the anonymous token in `localStorage` under a CivicLens key, attaches it via an interceptor, and clears it on explicit "forget this report". The token is a bearer credential, so it is never placed in a route, a query string or a `Referer` — a shared link to `/tracked/...` must be impossible to construct by copying the address bar.
 
 Two interceptors of note: the auth interceptor attaches the bearer token and transparently refreshes once on 401; the correlation-id interceptor echoes `traceId` from error responses into the UI so a citizen can quote it in a support request. Accessibility: every interactive element reachable by keyboard, visible focus, AA contrast, `aria-live` on async status changes, and a form that survives a flaky connection without losing typed input.
 
@@ -419,8 +489,8 @@ PLAN.md remains the source for effort estimates and cut order. Scope mapped to t
 
 | Phase | Ships | Gate |
 |---|---|---|
-| **P1 — Report and Track** | Auth, roles, issue create (3 photos, map pin), full 11-state machine, priority v1, my-reports + timeline, staff list/detail/transition, public shareable page, resolution report, seed data, deploy | A stranger reports a pothole from a phone browser and watches it change status. CI green, deployed, seeded, README with run steps |
-| **P2 — Triage and Workflow** | Departments + routing, assignment, SLA policies + overdue job, audit log, outbox + RabbitMQ + email, Redis cache, confirmations, rule-based duplicate flags, comments | An issue breaches SLA and appears in the overdue queue; the citizen gets an email on every transition; staff see only their department |
+| **P1 — Report and Track** | Auth, roles, **anonymous reporting with a tracking token** and `/tracked/**`, issue create (3 photos, map pin, disclosure choice, `OTHER` free text), full 11-state machine **with no auto-close**, priority v1, my-reports + timeline, staff list/detail/transition, stale-resolution queue, public shareable page with anonymous title redaction, comment edit within window, resolution report, seed data, deploy | A stranger reports a pothole from a phone browser **without an account**, gets a tracking link, and watches it change status. CI green, deployed, seeded, README with run steps |
+| **P2 — Triage and Workflow** | Departments + routing, assignment, SLA policies + overdue job, audit log, outbox + RabbitMQ + email, Redis cache + rate-limit budget headers, confirmations, rule-based duplicate flags, `category_proposals` promotion flow, free-text `?q=` search on `GET /issues` | An issue breaches SLA and appears in the overdue queue; the citizen gets an email on every transition; staff see only their department |
 | **P3 — AI Recommendation Layer** | Ports + Anthropic adapter + fake, async pipeline, validation gate, recommendation storage + accept/override UI, embeddings + pgvector, resilience (retry/DLQ/breaker/cost cap), injection tests | Kill the provider: citizen reporting is unchanged. With it on: staff see suggestions and can accept/override |
 | **P4 — Transparency and Analytics** | Public map + anonymized feed, rollups, ward dashboards, CSV export, public rate limits + PII assertions | A ward officer answers "what's our median resolution time this month?" without asking the developer |
 | **P5 — Mobile and Hardening** | Capacitor shell (camera/GPS), offline queue with idempotent sync, push, observability + alerts, backup + **performed** restore drill, privacy/retention pass, load test | Create a report in airplane mode, reconnect, it syncs exactly once. A restore from backup is demonstrated |
@@ -438,7 +508,13 @@ PLAN.md remains the source for effort estimates and cut order. Scope mapped to t
 - [ ] Uploads: magic-byte validation, size caps, generated key, non-executable, signed URL only, EXIF GPS stripped.
 - [ ] Refresh rotation actually revokes the prior token; reuse is detected and revokes the family.
 - [ ] CORS allow-list is the actual web origin(s), never `*`.
-- [ ] Rate limits live on login, register, issue create, comments, public reads, AI paths.
+- [ ] Rate limits live on login, register, issue create, comments, public reads, `/tracked/**`, AI paths.
+- [ ] Rate-limited responses carry `X-RateLimit-*` budget headers on success as well as on 429, and `Retry-After` on 429.
+- [ ] Anonymity: `public_code` is never accepted as a credential; tracking tokens are stored hashed only; no endpoint can recover or re-issue one; a token reaches only its own issues.
+- [ ] Anonymity: `audit_logs.ip_address` is null for every action on an anonymous issue, and the reporter's IP appears in no admin-readable table.
+- [ ] Anonymity: `TrackedIssueDetail` and `PublicIssue` are asserted field-for-field in tests, and the public title of an anonymous report is redacted.
+- [ ] Comments: edit and delete write revisions and audit rows; neither overwrites in place; editing invalidates a cached `ai_summary`.
+- [ ] Nothing transitions an issue to `CLOSED` except its own reporter's confirmation. No timer, job or SYSTEM actor can close one.
 - [ ] BCrypt cost ≥ 12. Passwords never logged, never returned in any DTO.
 - [ ] AI prompts wrap citizen content in a delimited data block; output never executed.
 - [ ] Secrets 100% environment-sourced; `.env` gitignored; gitleaks in CI.
@@ -506,11 +582,20 @@ AI_DAILY_COST_CAP_USD=5.00
 APP_BASE_URL=http://localhost:4200
 CORS_ALLOWED_ORIGINS=http://localhost:4200
 REOPEN_WINDOW_DAYS=14
-AUTO_CLOSE_AFTER_DAYS=30            # MUST be > REOPEN_WINDOW_DAYS
+STALE_RESOLVED_DAYS=14              # stale-resolution queue. Never closes anything
+COMMENT_EDIT_WINDOW_MINUTES=30
 DUPLICATE_RADIUS_METERS=150
 DUPLICATE_SIMILARITY_THRESHOLD=0.85
 RETENTION_DAYS=730
+
+# Anonymity — all three are secrets, generate them, never commit real values
+TRACKING_TOKEN_PEPPER=              # HMAC key for hashing tracking tokens
+IP_HASH_PEPPER=                     # HMAC key for IP hashing
+IP_HASH_ROTATION_DAYS=30            # rotated on this cadence, old hashes dropped
+ABUSE_WINDOW_DAYS=30                # how long an IP hash is retained
 ```
+
+There is deliberately **no `AUTO_CLOSE_AFTER_DAYS`**. See §4: nothing closes an issue on a timer, and `STALE_RESOLVED_DAYS` only drives a manager queue.
 
 Priority band thresholds (`80` / `55` / `30`) and all rate limits are configuration, not code.
 
@@ -522,7 +607,7 @@ These four were not in the original 36 and come from reading `docs/CivicLens-Arc
 
 | # | Question | Decision | Why |
 |---|---|---|---|
-| N1 | Auto-close vs. reopen right | `REOPENED` is reachable from `CLOSED` as well as `RESOLVED` within the 14-day window; auto-close window configured **longer** than the reopen window | Otherwise N-day auto-close silently destroys a citizen's right to dispute a fix |
+| N1 | Auto-close vs. reopen right | **Auto-close removed entirely.** `RESOLVED → CLOSED` is CITIZEN-only; `REOPENED` stays reachable from `CLOSED` within the 14-day window; the gap is covered by a `staleResolvedOnly` manager queue | An N-day auto-close silently destroys a citizen's right to dispute a fix, and teaches departments that reports vanish on their own. Replaced with a non-destructive queue that keeps a human in the loop |
 | N2 | PostGIS? | No. Bounding-box pre-filter in SQL + Haversine in Java | Sufficient at target scale; removes a native-extension dependency from backups and CI |
 | N3 | Retention semantics | Purging removes attachments, anonymizes reporter PII and drops exact coordinates; the **issue row is archived, not deleted** | Preserves aggregates and audit integrity while still deleting citizen data |
 | N4 | One department per user | `users.department_id` only; PLAN's `staff_departments` join table dropped | A join table inside the authorization path is a bug surface for a capability the product does not need |
@@ -541,4 +626,4 @@ These four were not in the original 36 and come from reading `docs/CivicLens-Arc
 
 ## 21. Considered and rejected
 
-NgRx · microservices · Kubernetes · a dedicated vector database · a generic rules-engine DSL for priority · a generic "vector search framework" · open-ended NL-to-SQL · image-embedding duplicate matching · WebSocket/SSE realtime (poll and refresh are enough) · multi-city tenancy · multi-language i18n · a general public open-data API · autonomous AI actions · open-ended NL analytics (cut first).
+NgRx · microservices · Kubernetes · a dedicated vector database · a generic rules-engine DSL for priority · a generic "vector search framework" · open-ended NL-to-SQL · image-embedding duplicate matching · WebSocket/SSE realtime (poll and refresh are enough) · multi-city tenancy · multi-language i18n · a general public open-data API · autonomous AI actions · open-ended NL analytics (cut first) · **citizen-created categories** (a proposal, reviewed by a manager — see §7.2 and §8 V2) · **token recovery for anonymous reports** (it would require holding the identifier anonymity exists to avoid) · **auto-close on any timer** (see §4).

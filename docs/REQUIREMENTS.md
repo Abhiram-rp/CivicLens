@@ -100,15 +100,19 @@
 
 ## 6. API contract requirements
 
+- **The contract is authored, not derived.** `api/openapi/civiclens-v1.yaml` is written first and linted in CI; the Angular client is generated from it and the Spring Boot controllers are written to match it exactly.
+- CI must diff springdoc's generated `/v3/api-docs` against the hand-authored file and **fail on any difference**. Until the backend exists the hand-authored file is the only contract, and nothing can drift from it.
 - Base path `/api/v1`; never break it, add `/api/v2`.
 - DTOs at the boundary; entities are never serialized.
 - Pagination on every list; default page size 20, max 100.
-- `Idempotency-Key` header on `POST /issues`; replay returns the original 201 body, not an error.
+- `Idempotency-Key` header on `POST /issues`; replay returns the original 201 body — including the original tracking token — not an error.
 - `multipart/form-data` for issue create and resolve.
 - Standard error envelope with `code`, `message`, `path`, `traceId`, optional `details[]`.
 - **404-not-403** for anything the caller cannot see; 403 only when the role could never use the endpoint.
 - Public endpoints return a dedicated redacted DTO with an explicit field allowlist.
-- OpenAPI published at `/v3/api-docs` with Swagger UI.
+- `x-required-roles` on every operation is the authoritative authorization rule; a test asserts each one matches a `@PreAuthorize` in the backend. Operations that accept a session **or** a tracking token carry an empty list and are authorized in the service layer — that exception is enumerated in the contract header, not left implicit.
+- Free-text `q` is P2, on `GET /issues` only, never on a public surface, and never unscoped for a citizen.
+- OpenAPI published at `/v3/api-docs` with Swagger UI, plus Redoc from the authored file.
 
 ---
 
@@ -120,11 +124,21 @@
 - [ ] Refresh rotation genuinely revokes the prior token; reuse detection revokes the family
 - [ ] CORS allow-list is the actual origin(s), never `*`
 - [ ] Uploads: magic-byte validation, ≤5 MB/file, ≤15 MB total, 3 photos, server-generated key, signed URL TTL ~5 min, EXIF GPS stripped
-- [ ] Rate limits on login, register, issue create, comments, public reads, AI paths
+- [ ] Rate limits on login, register, issue create, comments, public reads, `/tracked/**`, AI paths; rolling window per bucket; **fails open** on a Redis outage with a logged warning
+- [ ] Rate-limited responses carry `X-RateLimit-Limit` / `-Remaining` / `-Reset` / `-Bucket` on **success** as well as 429, and `Retry-After` on 429
+- [ ] Rate-limit bucket identity is a user id or a **salted, rotating IP hash** — never a raw IP in a Redis key
 - [ ] Secrets 100% environment-sourced; `.env` gitignored; gitleaks in CI
-- [ ] Audit log captures status changes, assignments, role changes, SLA policy changes, user enable/disable, priority downgrades
+- [ ] Audit log captures status changes, assignments, role changes, SLA policy changes, user enable/disable, priority downgrades, comment edits/deletes
 - [ ] IDOR test per endpoint that reads or writes an owned resource
 - [ ] Public DTOs asserted PII-free by serializing them in a test
+- [ ] `public_code` is never accepted as a credential anywhere
+- [ ] Tracking tokens are stored hashed only, and no endpoint can recover or re-issue one
+- [ ] `audit_logs.ip_address` is null for every action on an anonymous issue; the reporter's IP appears in no admin-readable table
+- [ ] `TrackedIssueDetail` and `PublicIssue` are asserted field-for-field; the public title of an anonymous report is redacted with `titleRedacted`
+- [ ] `/tracked/**` comment listing returns no `INTERNAL` row (asserted in a test)
+- [ ] Nothing but the reporter's own confirmation moves an issue to `CLOSED` — asserted exhaustively over every scheduled/job path
+- [ ] Comment edit and delete append revisions and audit rows; neither overwrites in place; editing invalidates a cached `ai_summary`
+- [ ] `@PreAuthorize` on every operation with a non-empty `x-required-roles`, asserted against the contract; the service-layer exception for `POST /issues` and `/tracked/**` is documented, not accidental
 
 ---
 
@@ -150,14 +164,19 @@
 
 **Tier 1 — mandatory, written before the UI:**
 - State machine: every valid transition, and every disallowed pair asserting a throw
+- **Closure invariant: an exhaustive test asserting no job, timer or SYSTEM path can write `CLOSED` — only the reporter's own confirmation can**
 - Authorization/IDOR: citizen cannot read or modify another citizen's data; citizen cannot call staff endpoints; department scoping
+- **Tracking-token scoping: a valid token reaches only the issues created with it; a `public_code` presented as a credential is rejected; an unknown token is 404, not 401**
+- **Anonymity: `audit_logs.ip_address` null on anonymous issues; reporter fields structurally absent from `TrackedIssueDetail` and `PublicIssue`; no `INTERNAL` comment on `/tracked/**`**
+- Comment window: edit after the window is 422; an edit writes a revision row; the body is never overwritten in place
 - Upload validation: wrong type, oversize, spoofed extension, path traversal attempt
 - Priority engine: band boundaries exact at 80/55/30, monotonic in age, category ordering
 - Auth: refresh rotation, reuse detection, revocation
+- **Rate limiting: budget headers present on a success; 429 carries `Retry-After`; a Redis outage serves the request rather than rejecting it**
 
-**Tier 2 — integration:** Testcontainers (Postgres+pgvector, RabbitMQ, MinIO) for the full create → AI → triage flow, outbox idempotency, SLA boundaries.
+**Tier 2 — integration:** Testcontainers (Postgres+pgvector, RabbitMQ, MinIO) for the full create → AI → triage flow, outbox idempotency, SLA boundaries, and the anonymous create → track → confirm path.
 
-**Tier 3 — E2E (minimum one):** citizen creates → AI analysis completes → manager assigns → officer resolves → citizen confirms → closed.
+**Tier 3 — E2E (minimum one):** citizen creates → AI analysis completes → manager assigns → officer resolves → citizen confirms → closed. Plus a second E2E: **a visitor with no account reports anonymously, receives a tracking token, follows the status, comments, confirms, and cannot reach any other issue with that token.**
 
 **Frontend:** interceptor refresh logic, report form validation, one critical workflow test.
 
@@ -168,10 +187,11 @@
 ## 10. CI/CD requirements
 
 GitHub Actions, on every push and PR:
-1. Backend: `mvn verify` (unit + integration)
-2. Frontend: install, lint, `ng test`, production build
-3. **gitleaks** secret scan
-4. On merge to `main`: build Docker images, push to registry
+1. **Contract: `npx @redocly/cli lint api/openapi/civiclens-v1.yaml` — 0 errors, 0 warnings.** This runs first; nothing else is worth building against a contract that will not parse.
+2. Backend: `mvn verify` (unit + integration), including the springdoc-vs-authored diff
+3. Frontend: install, lint, `ng test`, production build
+4. **gitleaks** secret scan
+5. On merge to `main`: build Docker images, push to registry
 
 Split fast unit tests from slower Testcontainers jobs to keep feedback tight.
 

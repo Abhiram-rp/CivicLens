@@ -58,16 +58,21 @@ Each module owns its tables. Enforce boundaries with ArchUnit tests (add in P1, 
 
 ### 5.1 Issue state machine
 
+`docs/SPEC.md` §4 holds the authoritative 11-state matrix. The shape:
+
 ```
-SUBMITTED → ACKNOWLEDGED → IN_PROGRESS → RESOLVED → CLOSED
-    ↓            ↓              ↓
- REJECTED     REJECTED      (no reject after work starts)
-RESOLVED → IN_PROGRESS   (reopen if fix rejected by citizen/staff)
+SUBMITTED → AI_ANALYZING → TRIAGED → ASSIGNED → IN_PROGRESS → RESOLVED → CLOSED
+                ↓             ↓          ↓           ↓            ↑         ↑
+             (AI off)     REJECTED   ASSIGNED→TRIAGED   (assignee)  └─ REOPENED ─┘
+                             DUPLICATE (unassign)                     (reporter, 14d)
+                                          ↓
+                                      CANCELLED
 ```
 
 - Transitions live in **one** place (enum + `IssueLifecycleService`). Controllers never set status directly.
 - Every transition writes an audit row (from P2; a simple `status_history` row from P1).
 - Invalid transition → `409 Conflict` with a clear error code.
+- **No timer closes an issue.** `RESOLVED → CLOSED` is the reporter's confirmation and nothing else; `REOPENED` stays reachable from `CLOSED`; the "fixed but never confirmed" case is a manager queue (`staleResolvedOnly`), not a job. See SPEC.md §4.
 
 ### 5.2 Priority engine (deterministic)
 
@@ -78,8 +83,9 @@ RESOLVED → IN_PROGRESS   (reopen if fix rejected by citizen/staff)
 
 ### 5.3 Roles
 
-`CITIZEN` (own reports, confirm others) · `STAFF` (department-scoped) · `ADMIN` (everything, config).
-Authorization is checked in the **service layer** by ownership/department, never by "hidden in the UI". IDOR tests are mandatory.
+`CITIZEN` · `FIELD_OFFICER` · `DEPARTMENT_MANAGER` · `ADMIN` — the full matrix is in `docs/SPEC.md` §3. (PLAN originally said three with a single `STAFF`; that was superseded: `IN_PROGRESS`/`RESOLVED` are restricted to the assignee, which is meaningless without a distinct officer role.)
+
+Authorization is checked in the **service layer** by ownership/department, never by "hidden in the UI". IDOR tests are mandatory. A report is additionally reachable by the **anonymous reporter's tracking token**, which is a bearer credential scoped to that reporter's own issues — see SPEC.md §3.1.
 
 ---
 
@@ -95,51 +101,68 @@ Authorization is checked in the **service layer** by ownership/department, never
 
 **Scope**
 - Auth: register/login, JWT + refresh, roles
-- Report flow: title, description, category, photo upload (≤ 3 images), map pin, address text
-- Issue lifecycle via state machine (§5.1)
-- Citizen: "My reports" + status timeline
-- Staff/Admin: issue list with filters (status, category, priority), detail view, status update
+- **Anonymous reporting**: `disclosure` choice on the report form, unguessable `trk_` tracking token issued once and stored hashed, and the `/tracked/**` tree (list, detail, edit, comments, confirm, reopen) that token authenticates
+- Report flow: title, description, category (incl. `OTHER` + `proposedCategoryText`), photo upload (≤ 3 images), map pin, address text
+- Issue lifecycle via state machine (§5.1), **no auto-close**, plus the `staleResolvedOnly` manager queue
+- Citizen: "My reports" + status timeline; tracked reports view
+- Staff/Admin: issue list with filters (status, category, priority), detail view, status update, category-proposal resolution at triage
+- Comments with a bounded edit/delete window backed by append-only revisions
 - Priority engine v1
-- Public read-only issue detail page (shareable link)
+- Public read-only issue detail page (shareable link), with the title of an anonymous report redacted
+- `active` flags on categories and departments, enforced on the reference endpoints and refused while open issues exist
+- Rate-limit budget headers on every rate-limited response
+- **Contract-first**: `api/openapi/civiclens-v1.yaml` is written and linted before any UI code; Angular and Spring Boot are both built against it
 - Deployment: real URL, HTTPS, seed data
 
 **Data model (Flyway V1)**
 - `users(id, email UNIQUE, password_hash, role, created_at)`
-- `issues(id, reporter_id, title, description, category, status, priority_score, priority_band, lat, lng, address, created_at, updated_at)`
+- `issues(id, reporter_id NULL, disclosure, tracking-scoped, title, description, category, proposed_category_text, status, priority_score, priority_band, lat, lng, address, ip_hash, idempotency_key, created_at, updated_at)` — `reporter_id` null means anonymous
+- `tracking_tokens(id, issue_id, token_hash, created_at, last_used_at)` — hash only, never the plaintext
 - `issue_media(id, issue_id, storage_key, content_type, size_bytes, created_at)`
+- `issue_comments(id, issue_id, author_id NULL, author_anonymous, body, visibility, edited_at, revision_count, deleted_at, created_at)`
+- `comment_revisions(id, comment_id, body, edited_by, created_at)` — append-only
 - `issue_status_history(id, issue_id, from_status, to_status, changed_by, note, created_at)`
+- `departments(..., active)` · `categories(..., active)`
 - Index: `issues(status)`, `issues(category)`, `issues(reporter_id)`, `issues(lat, lng)`
 
-**API (P1)**
+**API (P1)** — the full contract is `api/openapi/civiclens-v1.yaml`; this is the headline surface
 | Method | Path | Auth |
 |---|---|---|
-| POST | `/api/auth/register`, `/login`, `/refresh` | public |
-| POST | `/api/issues` (multipart) | CITIZEN |
-| GET | `/api/issues/mine` | CITIZEN |
-| GET | `/api/issues/{id}` | public (redacted) / owner / staff |
-| GET | `/api/issues` (filter, page) | STAFF+ |
-| POST | `/api/issues/{id}/transition` | STAFF+ |
+| POST | `/api/v1/auth/register`, `/login`, `/refresh` | public |
+| POST | `/api/v1/issues` (multipart) | **optional** — session *or* anonymous |
+| GET | `/api/v1/tracked/**` (7 operations) | `X-Tracking-Token` |
+| GET | `/api/v1/issues/mine` | CITIZEN |
+| GET | `/api/v1/issues/{id}` | owner / staff (404 if not visible) |
+| GET | `/api/v1/public/issues/{publicCode}` | public (redacted DTO) |
+| GET | `/api/v1/issues` (filter, page, `staleResolvedOnly`) | scoped per role |
+| POST | `/api/v1/issues/{id}/transition` | staff |
+| PUT/DELETE | `/api/v1/issues/{id}/comments/{id}` | author, within window |
 
 **Engineering tasks**
+0. **Write `api/openapi/civiclens-v1.yaml` first and lint it in CI.** Generate the Angular client from it. Nothing else in this list starts until the contract is green.
 1. Repo, Docker Compose (app + Postgres), Flyway, CI (build + test)
 2. `identity` module, security config, password hashing (BCrypt), JWT filter
 3. `issue` module: entity, repo, lifecycle service, priority service
 4. Media upload: validate type + size + magic bytes, store on S3-compatible object storage (R2/S3) or a volume for local; **never** trust client filename
-5. Angular: auth pages, report form + Leaflet picker, my-reports, staff list/detail
-6. Global error model (`{code, message, details}`), validation, pagination
-7. Deploy + smoke test
+5. **Anonymity**: tracking-token minting + hashing, `X-Tracking-Token` filter, `/tracked/**` with reporter-less response allowlists, IP-hash helper with a rotating pepper
+6. Angular: auth pages, report form + Leaflet picker + disclosure choice, my-reports, **tracked reports**, staff list/detail
+7. Global error model (`{code, message, details}`), validation, pagination, rate-limit budget headers
+8. Deploy + smoke test
 
 **Tests that matter**
 - State machine: every valid and invalid transition
 - Authorization: citizen can't read/modify another's private data; citizen can't call staff endpoints
+- **Anonymity: a tracking token reaches only its own issues; a `public_code` is rejected as a credential; `TrackedIssueDetail` and `PublicIssue` contain no reporter field; `audit_logs.ip_address` is null on an anonymous issue**
+- **Closure: no job, timer or SYSTEM actor can move an issue to `CLOSED`** (an exhaustive test asserting no scheduled path writes that status)
+- Comments: edit outside the window is 422; a revision row is written; the body is never overwritten
 - Upload validation: wrong type, oversize, spoofed extension
 - Priority engine: monotonic with age, category ordering
 
 **Definition of Done / Ship gate**
-- A stranger reports a pothole from a phone browser and watches it change status
+- A stranger reports a pothole from a phone browser **without an account**, gets a tracking link, and watches it change status
 - CI green, deployed, seed admin/staff accounts, README with run steps
 
-**Out of scope for P1:** departments, SLA, email, AI, analytics, duplicate detection, social login.
+**Out of scope for P1:** departments, SLA, email, AI, analytics, duplicate detection, social login, free-text `?q=` search, `category_proposals` promotion (P2).
 
 ---
 
@@ -385,11 +408,23 @@ Authorization is checked in the **service layer** by ownership/department, never
 | 2026-09-28 | 404 for anything invisible, 403 only when the role could never use the endpoint | Consistent IDOR defense; mixing the two re-introduces the existence leak |
 | 2026-09-28 | Reopen window 14 days, reporter only, configurable; staff may also reopen with a reason | Unlimited reopen means a 2027 report about a 2024 pothole re-entering an active queue |
 | 2026-09-28 | Both definitions of done apply: per-phase gates, plus a separate pre-launch readiness gate | Phase gates say when a phase is done; the launch gate says when citizens can be trusted with real data |
-| 2026-09-28 | N1: `REOPENED` reachable from `CLOSED` within the window; auto-close window > reopen window | Found while reconciling the architecture spec. Auto-close must not silently destroy a citizen's right to dispute a fix |
+| 2026-09-28 | N1 **superseded** — see the anonymous-reporting block below; auto-close is now removed outright | The original fix kept the reopen-from-`CLOSED` path but left the timer in place |
 | 2026-09-28 | N2: no PostGIS — bounding-box pre-filter + Haversine in Java | Sufficient at target scale; removes a native extension from backups and CI |
 | 2026-09-28 | N3: retention purges attachments and anonymizes PII but archives the issue row | Deletes citizen data while preserving the aggregates and audit integrity |
 | 2026-09-28 | N4: one department per user via `users.department_id`; dropped `staff_departments` | A join table inside the authorization path is a bug surface for a capability the product does not need |
 | 2026-09-28 | Version pins updated: Spring Boot 4.1.x + springdoc 3.1.x, Angular 22.2.0, `claude-sonnet-5` | Verified against the registry and vendor docs, not copied from the older specs. Spring Boot 3.5.x + springdoc 2.9.x is the one-line fallback |
+| 2026-09-28 | **Anonymous reporting, disclosure control and the tracking token.** `POST /issues` accepts a session *or* an anonymous submitter; `disclosure` ∈ `SHARE_DETAILS`\|`ANONYMOUS`; an anonymous report is identified by an unguessable `trk_` token stored only as a hash and presented in the `X-Tracking-Token` header; new `/tracked/**` tree (7 operations) serves that reporter | The reporter chose anonymity but still needs to follow their report. `public_code` is a dense `nextval` range from 100001, so it is enumerable and can never be the private key — a sequential id in front of an unauthenticated read endpoint is an enumeration primitive. The token is a separate tree rather than an extra credential on `/issues` so the `x-required-roles` drift assertion stays meaningful and the reporter-less response allowlist is structural |
+| 2026-09-28 | Anonymity extends to the reporter's IP: `audit_logs.ip_address` null on anonymous issues, salted rotating IP hash in the abuse store only; anonymous reports get no notifications; the public page redacts an anonymous report's title to the category name with `titleRedacted` | The IP is the only identity an anonymous report has, so storing it in an admin-readable table leaves the anonymity one records request away. Citizen-authored text is frequently the identifying detail, so the public title deanonymizes as effectively as a name would |
+| 2026-09-28 | **Auto-close removed outright.** `RESOLVED → CLOSED` is CITIZEN-only; no SYSTEM actor on any transition; `AUTO_CLOSE_AFTER_DAYS` deleted; `REOPENED` still reachable from `CLOSED`; replaced by `GET /issues?staleResolvedOnly=true` + `STALE_RESOLVED_DAYS` | A timer that closes reports destroys the citizen's right to dispute a fix and teaches departments that reports vanish on their own. The underlying problem — an authority that fixes a report and hears nothing back — is real, so it is met with a non-destructive manager queue that keeps a human in the loop |
+| 2026-09-28 | **Comments are editable and deletable within a window** (`COMMENT_EDIT_WINDOW_MINUTES=30`, author only). Edits append `comment_revisions`; deletes are soft tombstones; both are audited; an ADMIN moderation delete skips the window and requires a reason. Editing a PUBLIC comment invalidates a cached `ai_summary` | A comment in an official record should be correctable, but overwriting it in place destroys the evidence that a correction happened. `issue_status_history` and `audit_logs` are append-only by rule; extending that to a separate revision table is strictly better than punching a hole in the trail |
+| 2026-09-28 | **Custom categories are proposals, not creations.** `OTHER` category always present; `proposedCategoryText` required when it is picked and rejected otherwise; a manager resolves it at triage into an existing category or a new one. P2 adds `category_proposals` to aggregate repeats | `defaultDepartmentId` drives routing and `SlaPolicy.categoryId` drives deadlines, so a category minted from raw citizen text would arrive with neither, and the taxonomy would fill with near-duplicates that the AI then has to classify around |
+| 2026-09-28 | `active` flags on `categories` and `departments`; `/reference/*` returns active rows only; deactivating either is refused with a 409 while it holds open issues | Retiring is not deleting — history has to stay readable — but retiring a department that is sitting on a backlog silently strands those reports, which is exactly the failure the escalation path exists to prevent |
+| 2026-09-28 | **Instagram-style rate limiting: mechanism yes, numbers no.** Rolling Redis window per bucket; budget headers `X-RateLimit-Limit`/`-Remaining`/`-Reset`/`-Bucket` emitted on successes as well as 429s; `Retry-After` on 429; dual IP+account buckets on login; bucket identity is a user id or a salted IP hash; fails open | Instagram's consumer limits are proprietary and unpublished, so "the same thing" is only possible as a shape. What Meta's Graph API documents is the mechanism worth copying: separate app/user rolling windows that are *observable before rejection*, which is what lets a client disable a button and an operator see pressure building. IP-keyed buckets are also a requirement of anonymous reporting, not a nice-to-have |
+| 2026-09-28 | `emailVerified` removed from `CurrentUser` and `User` — no verification flow ships, so the field asserted a guarantee the product does not make | A boolean that is always `true` is worse than an absent field: it invites a client to render a verified badge that no process ever backs |
+| 2026-09-28 | `areaLabel` stays nullable and is simply `null` in P1; populated in P4 when `areas` exists | The column has no source before the areas table does |
+| 2026-09-28 | The citizen sees `assignedOfficerName`; no notification per confirmation, the reporter sees a live `confirmationCount` instead | A citizen is entitled to know which officer is handling their report, and it is the most trust-building field on the screen. A notification per confirmation trains people to ignore the channel that matters |
+| 2026-09-28 | Free-text `?q=` search is **not** in P1. P2, on `GET /issues` only, never on the public feed, and hard-scoped to a citizen's own reports | Every P1 queue need is a filter, and `q` needs `pg_trgm` plus a relevance decision. Unscoped it becomes an enumeration primitive over other people's reports |
+| 2026-09-28 | OpenAPI contract authored at `api/openapi/civiclens-v1.yaml` with `redocly.yaml`; 53 operations, every one carrying `x-required-roles`; 0 lint errors, 0 warnings. Angular and Spring Boot are both built against this file, and CI must diff springdoc's generated document against it | Contract-first with the client generated from the same document is the only way "the API is the source of truth" is checkable rather than aspirational. The `@PreAuthorize` drift assertion applies to operations with a non-empty `x-required-roles`; `POST /issues` and `/tracked/**` are service-layer authorized because `@PreAuthorize` cannot express "anonymous OR CITIZEN" |
 
 ## 12. Parking Lot (ideas not in any phase)
 
