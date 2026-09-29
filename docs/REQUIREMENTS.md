@@ -31,7 +31,8 @@
 | Requirement | Detail |
 |---|---|
 | Framework | Angular **22.2.0**, standalone components, lazy-loaded routes |
-| UI kit | NG-ZORRO (`ng-zorro-antd`) **22.1.1** (RxJS `^7.4.0`) |
+| UI kit | NG-ZORRO (`ng-zorro-antd`) **22.1.1** |
+| RxJS | `^7.4.0` — the floor Angular 22 declares (`^6.5.3 \|\| ^7.4.0`). Not a UI-kit dependency: NG-ZORRO declares no RxJS peer at all. `^` is safe against the RxJS 8 rewrite because it cannot cross a major |
 | State | Signals for local/UI state; RxJS `BehaviorSubject` services for session state. **No NgRx** |
 | Language | TypeScript `>=6.0 <6.1`, strict mode |
 | Forms | Typed reactive forms, validation messages mirroring the backend's error `details[]` |
