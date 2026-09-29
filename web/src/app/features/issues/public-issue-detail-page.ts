@@ -1,5 +1,4 @@
 import { Component } from '@angular/core';
-import { CitizenShell } from '../../layouts/citizen-shell';
 import { NotYet } from '../../shared/not-yet';
 
 /**
@@ -13,11 +12,9 @@ import { NotYet } from '../../shared/not-yet';
  */
 @Component({
   selector: 'app-public-issue-detail-page',
-  imports: [CitizenShell, NotYet],
+  imports: [NotYet],
   template: `
-    <app-citizen-shell>
-      <app-not-yet [phase]="'P1'" [operations]="operations" />
-    </app-citizen-shell>
+    <app-not-yet [phase]="'P1'" [operations]="operations" />
   `,
 })
 export class PublicIssueDetailPage {

@@ -1,37 +1,80 @@
 // CivicLens global styles.
 //
-// The theme is an explicit accessible palette rather than a Material default -
-// see `_civiclens-theme.scss` for why, and `theme.spec.ts` for the measured
-// contrast assertions that make the claim checkable.
+// The theme is an explicit accessible palette layered over NG-ZORRO rather than
+// the library's own - see `_civiclens-theme.scss` for why (its shipped primary
+// is 3.24:1 on white), and `theme.spec.ts` for the measured assertions that make
+// the claim checkable.
+//
+// Load order matters and is not arbitrary:
+//   1. `ng-zorro-antd.variable.min.css` (listed first in angular.json) declares
+//      the `--ant-*` properties on `html`.
+//   2. This file declares the same properties on `:root, html`.
+//   3. `:root` and `html` are the same element and have equal specificity, so
+//      step 2 wins purely by document order - no `!important` anywhere, which is
+//      the point: an `!important` here would be unreachable to a future override
+//      and would hide a library upgrade silently changing a colour.
+//
+// WHY THE WHOLE STYLESHEET AND NOT PER-COMPONENT IMPORTS
+//
+// NG-ZORRO documents importing only the components you use, and that advice is
+// right for most projects. Measured here it is the larger option: the 36
+// components the citizen flow needs sum to 89.0 kB gzip against 68.8 kB for the
+// single `variable` build. Per-component entries each carry their own copy of
+// shared base rules, so the 36 imports cost more than all 79. Since the whole
+// sheet fits inside the 250 kB initial budget with room to spare, the single
+// import is both simpler and smaller.
+//
+// This is a measurement, not a preference, and it is a fact about *this* set of
+// components. A future app that uses a small fraction of the library - an admin
+// console with no date pickers, say - should re-measure before assuming the
+// single import still wins.
 
 @use 'styles/civiclens-theme';
+@use 'styles/tokens' as t;
 
+:root,
 html {
   height: 100%;
-  @include civiclens-theme.civiclens-theme();
-}
 
-:root {
+  // NG-ZORRO semantic overrides. Measured against the same floors as the
+  // library defaults they replace.
+  @include civiclens-theme.civiclens-antd-theme();
+
   // The project-owned colour vocabulary application CSS uses. Same source
-  // variables as the Material overrides, so the two cannot disagree.
+  // variables as the `--ant-*` overrides above, so the two cannot drift.
   @include civiclens-theme.civiclens-colors();
 }
 
+// Body type.
+//
+// The system stack NG-ZORRO itself declares, restated here so the app owns its
+// typography rather than inheriting it. `Roboto` is kept in the list because
+// NG-ZORRO's own stack names it and Android users have it; it resolves to
+// nothing on the other platforms, so no webfont is downloaded either way.
+@mixin civiclens-typography() {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'Noto Sans', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
+    'Noto Color Emoji';
+  font-size: 16px;
+  line-height: 1.5715;
+}
+
 body {
+  @include civiclens-typography();
+
   color-scheme: light;
   background-color: var(--cl-surface);
   color: var(--cl-on-surface);
-  font: var(--mat-sys-body-medium);
   margin: 0;
   height: 100%;
 }
 
-// A visible focus ring on every interactive element, not only the ones
-// Material styles itself. A keyboard user must be able to see where they are
-// on a page that is mostly custom components, and `:focus-visible` keeps the
-// ring off mouse clicks so it does not become visual noise.
+// A visible focus ring on every interactive element, not only the ones NG-ZORRO
+// styles itself. A keyboard user must be able to see where they are on a page
+// that is mostly custom components, and `:focus-visible` keeps the ring off
+// mouse clicks so it does not become visual noise.
 :focus-visible {
-  outline: 2px solid var(--cl-primary);
+  outline: 2px solid var(--cl-outline);
   outline-offset: 2px;
 }
 
@@ -41,10 +84,28 @@ body {
   outline: none;
 }
 
-// Respect a stated preference for less motion. The shell has no animation of its
-// own, but Material's do, and vestibular discomfort is a real cost of a
-// transition nobody asked for.
+// Respect a stated preference for less motion. NG-ZORRO animates dropdowns,
+// drawers, and the wave effect on button press; vestibular discomfort is a real
+// cost of a transition nobody asked for.
+//
+// The blanket duration reset below is the whole mechanism, and it is not a
+// shortcut: NG-ZORRO's `variable` build hard-codes its durations (`.1s` `.2s`
+// `.24s` `.3s`) and exposes **no** motion custom properties, so there is no token
+// to set and an earlier attempt to set `--ant-motion-duration-*` here was a dead
+// rule that still read as a working override. `animation-duration` is a longhand
+// of the `animation` shorthand the library uses, and an `!important` longhand
+// beats a non-important shorthand, so the reset does reach the wave even though
+// that rule is written as a shorthand.
+//
+// The one custom property is the wave's shadow colour, and its real name is
+// `--antd-wave-shadow-color` - the library is inconsistent about its own prefix,
+// colour tokens being `--ant-*` and this one being `--antd-*`. `:root` is `html`,
+// the selector the library declares it on, so load order is what makes ours win.
 @media (prefers-reduced-motion: reduce) {
+  :root {
+    --antd-wave-shadow-color: transparent;
+  }
+
   *,
   *::before,
   *::after {
@@ -54,3 +115,9 @@ body {
     scroll-behavior: auto !important;
   }
 }
+
+// The AA failures NG-ZORRO's custom properties cannot reach: secondary text,
+// links, disabled labels, and placeholders. Each override states the default it
+// replaces, so a library upgrade that reintroduces one is a visible diff rather
+// than a silent regression.
+@include civiclens-theme.civiclens-antd-overrides();

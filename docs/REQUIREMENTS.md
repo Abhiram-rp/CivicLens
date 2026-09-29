@@ -31,18 +31,18 @@
 | Requirement | Detail |
 |---|---|
 | Framework | Angular **22.2.0**, standalone components, lazy-loaded routes |
-| UI kit | Angular Material **22.2.0** + CDK 22.2.0 (RxJS `^7.4.0`) |
+| UI kit | NG-ZORRO (`ng-zorro-antd`) **22.1.1** (RxJS `^7.4.0`) |
 | State | Signals for local/UI state; RxJS `BehaviorSubject` services for session state. **No NgRx** |
 | Language | TypeScript `>=6.0 <6.1`, strict mode |
 | Forms | Typed reactive forms, validation messages mirroring the backend's error `details[]` |
 | Maps | Leaflet + OpenStreetMap. GPS coordinates are the primary location input on every device; map-drag is an optional refinement, never the only path |
-| Styling | Material with an **explicitly defined accessible theme** — Material's stock theme does not meet WCAG 2.1 AA, and AA is a launch gate |
+| Styling | NG-ZORRO with an **explicitly defined accessible theme** — the stock Ant palette does not meet WCAG 2.1 AA (its default primary is 3.24:1, warning 1.90:1), and AA is a launch gate |
 | HTTP | Two interceptors: auth (attach bearer, transparent single refresh on 401, no retry storm) and correlation-id (surface `traceId` from error envelopes) |
 | Token storage | Access token in **memory only**, never `localStorage`/`sessionStorage` |
 | Routing | Role guards for UX only — the backend is the security boundary and re-checks everything |
 | Vocabulary | UI says "Report"; domain/API/DB say `issue` |
 
-**Unit test runner:** whatever `ng new` wires up in v22 (Vitest replaced Karma; Karma removed in v21). Confirm with `ng test --help` at scaffold time and record it here.
+**Unit test runner:** **Vitest**, as scaffolded by Angular 22's `@angular/build:unit-test` builder (Karma was removed in v21). Run it with `npm run test:ci` (`ng test --watch=false`). Note that bare `npx vitest run` is *not* equivalent: it has no Angular build pipeline, so component tests fail with JIT/compiler errors that look like real failures.
 
 ---
 
@@ -160,13 +160,13 @@
 
 **Accessibility (citizen flows, WCAG 2.1 AA):**
 - Every interactive element keyboard-reachable with visible focus
-- Text contrast ≥ 4.5:1, UI component contrast ≥ 3:1
+- Text contrast ≥ 4.5:1, UI component contrast ≥ 3:1. **The UI kit's stock palette does not meet this**, so the theme is defined in `web/src/styles/_tokens.scss` and asserted by `web/src/app/theme.spec.ts`, which measures the actual token values rather than trusting a comment
 - Form errors programmatically tied to their fields; `aria-live` for async status changes
 - Usable at 200% zoom and at 320 px viewport width
 - Never colour-only encoding of status or priority
 
 **Performance:**
-- Angular initial bundle ≤ 250 KB gzipped for the citizen shell; lazy-load staff and admin features
+- Angular initial bundle ≤ 250 KB gzipped for the citizen shell; lazy-load staff and admin features. Enforced in CI by `web/scripts/check-bundle-budget.mjs`, which measures the real gzipped initial payload (currently ~193 KB) and also fails if mock-server code reaches the initial bundle. The `budgets` block in `web/angular.json` is a separate, much looser *raw*-size limit and will warn on this bundle by design — it is not the gate that matters.
 - First contentful paint < 2 s on throttled 3G
 - API p95 < 300 ms excluding AI calls; list endpoints < 200 ms
 - Normalized photo ≤ 2 MB, max dimension 1600 px
@@ -210,7 +210,7 @@
 GitHub Actions, on every push and PR:
 1. **Contract: `npx @redocly/cli lint api/openapi/civiclens-v1.yaml` — 0 errors, 0 warnings.** This runs first; nothing else is worth building against a contract that will not parse.
 2. Backend: `mvn verify` (unit + integration), including the springdoc-vs-authored diff
-3. Frontend: install, lint, `ng test`, production build
+3. Frontend: `npm ci` then `npm run verify` (contract check → `ng test --watch=false` → production build → the 250 kB gzip budget gate)
 4. **gitleaks** secret scan
 5. On merge to `main`: build Docker images, push to registry
 
@@ -263,4 +263,4 @@ Split fast unit tests from slower Testcontainers jobs to keep feedback tight.
 3. **Email provider** — **Resend vs SES, and this is now P1, not P2**: the concealed approval gate needs a transactional sender. Pick by deliverability to the target community's dominant inbox; everything else about the two is equivalent here. A local dev override (`SMTP_*` to Mailpit) is required so the flow is testable offline
 4. **Embedding provider** (P3) — Voyage AI vs self-hosted, decided at the P3 migration
 5. **Target scale** — confirm the real launch community size so indexes, page sizes and rate limits are sized for it
-6. **Unit test runner** — confirm what Angular 22 scaffolds with, then pin it here
+6. ~~**Unit test runner**~~ — **resolved 2026-09-29: Vitest**, via Angular 22's `@angular/build:unit-test` builder. See §1.

@@ -2,20 +2,30 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Web</title>
+    <title>CivicLens</title>
     <base href="/" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <link rel="icon" type="image/x-icon" href="favicon.ico" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500&display=swap"
-      rel="stylesheet"
-    />
-    <link
-      href="https://fonts.googleapis.com/icon?family=Material+Symbols+Outlined"
-      rel="stylesheet"
-    />
+
+    <!--
+      No webfont request.
+
+      `styles.scss` sets the body font to a system stack (-apple-system,
+      Segoe UI, Roboto, and so on) rather than a downloaded face, so the Roboto
+      link this document used to carry was a render-blocking request to Google
+      for a font nothing referenced - and one that would fail closed, leaving a
+      citizen on a metered connection staring at a blank page until it timed out.
+      A system stack also means the body copy renders in the reader's own chosen
+      size, which a fixed webfont overrides.
+
+      NG-ZORRO renders icons as inline SVG from `@ant-design/icons-angular`
+      (see `src/app/ui/icons.ts`), so there is no icon font to download and no
+      `<link>` to the Material Symbols font is needed.
+
+      If a webfont is ever wanted, it has to be self-hosted, subset to the
+      weights actually used, and loaded with `font-display: swap` - not added
+      back as a third-party stylesheet.
+    -->
   </head>
   <body>
     <app-root></app-root>

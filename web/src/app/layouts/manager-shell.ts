@@ -1,4 +1,5 @@
 import { Component } from '@angular/core';
+import { RouterOutlet } from '@angular/router';
 import { AppShell } from './app-shell';
 
 /**
@@ -13,21 +14,21 @@ import { AppShell } from './app-shell';
  * backlog of reports left resolved but never confirmed and nothing changes on
  * its own. Labelling it "needs attention" would be more honest than "stale".
  */
-@Component({
-  selector: 'app-manager-shell',
-  imports: [AppShell],
-  template: `
-    <app-shell navLabel="Department manager" heading="Department queue" [links]="links">
-      <ng-content />
-    </app-shell>
-  `,
-})
+  @Component({
+    selector: 'app-manager-shell',
+    imports: [AppShell, RouterOutlet],
+    template: `
+      <app-shell navLabel="Department manager" heading="Department queue" [links]="links">
+        <router-outlet />
+      </app-shell>
+    `,
+  })
 export class ManagerShell {
   readonly links = [
-    { path: '/manager/queue', label: 'Queue', exact: true },
-    { path: '/manager/awaiting-confirmation', label: 'Needs confirmation' },
-    { path: '/manager/duplicates', label: 'Duplicates' },
-    { path: '/manager/analytics', label: 'Analytics' },
-    { path: '/manager/categories', label: 'Category proposals' },
+    { path: '/manager/queue', label: 'Queue', icon: 'home', exact: true },
+    { path: '/manager/awaiting-confirmation', label: 'Needs confirmation', icon: 'info-circle' },
+    { path: '/manager/duplicates', label: 'Duplicates', icon: 'file-search' },
+    { path: '/manager/analytics', label: 'Analytics', icon: 'search' },
+    { path: '/manager/categories', label: 'Category proposals', icon: 'plus' },
   ];
 }

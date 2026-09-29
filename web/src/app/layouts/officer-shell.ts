@@ -1,5 +1,5 @@
 import { Component, inject } from '@angular/core';
-import { RouterLink } from '@angular/router';
+import { RouterLink, RouterOutlet } from '@angular/router';
 import { AppShell } from './app-shell';
 import { AuthService } from '../core/auth/auth.service';
 
@@ -15,21 +15,21 @@ import { AuthService } from '../core/auth/auth.service';
  * manager doing manual triage, which is why the signed-out state renders a
  * sign-in link rather than assuming a session.
  */
-@Component({
-  selector: 'app-officer-shell',
-  imports: [AppShell, RouterLink],
-  template: `
-    <app-shell navLabel="Field officer" heading="Field work" [links]="links">
-      @if (auth.isSignedIn) {
-        <p class="identity">
-          Signed in as {{ auth.snapshot?.fullName }}
-        </p>
-      } @else {
-        <p><a routerLink="/sign-in">Sign in</a> to see issues assigned to you.</p>
-      }
-      <ng-content />
-    </app-shell>
-  `,
+  @Component({
+    selector: 'app-officer-shell',
+    imports: [AppShell, RouterLink, RouterOutlet],
+    template: `
+      <app-shell navLabel="Field officer" heading="Field work" [links]="links">
+        @if (auth.isSignedIn) {
+          <p class="identity">
+            Signed in as {{ auth.snapshot?.fullName }}
+          </p>
+        } @else {
+          <p><a routerLink="/sign-in">Sign in</a> to see issues assigned to you.</p>
+        }
+        <router-outlet />
+      </app-shell>
+    `,
   styles: `
     .identity {
       color: var(--cl-on-surface-variant);
@@ -41,7 +41,7 @@ export class OfficerShell {
   protected readonly auth = inject(AuthService);
 
   readonly links = [
-    { path: '/officer/assigned', label: 'Assigned to me', exact: true },
-    { path: '/notifications', label: 'Notifications' },
+    { path: '/officer/assigned', label: 'Assigned to me', icon: 'file-text', exact: true },
+    { path: '/notifications', label: 'Notifications', icon: 'info-circle' },
   ];
 }

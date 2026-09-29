@@ -5,25 +5,90 @@
 //
 // WCAG 2.1 relative-luminance contrast. 4.5 for text, 3.0 for UI component
 // boundaries and focus indicators.
+//
+// Every colour below exists because NG-ZORRO's shipped value for the same role
+// fails the floor. The measured ratio of each default is recorded in
+// `_civiclens-theme.scss` and `theme.spec.ts` re-measures them from the library's
+// own stylesheet, so "we chose an accessible palette" is a check rather than a
+// claim. A token added here without a stated floor fails the build.
 
-$surface: #ffffff; // 17.09:1 with on-surface
-$surface-container: #f1f3f5; // 15.36:1 with on-surface
+$surface: #ffffff; // 17.09:1 with $on-surface
+$surface-container: #f1f3f5; // 15.36:1 with $on-surface
 
-$on-surface: #1a1c1e; // 17.09:1 on surface
-$on-surface-variant: #41474d; // 9.40:1 on surface
-$primary: #00565b; // 8.46:1 on surface
-$on-primary: #ffffff; // 8.46:1 on primary
-$primary-hover: #003f43; // 11.72:1 on on-primary
-$secondary: #d7e3e4; // 13.02:1 with on-secondary
-$on-secondary: #1a1c1e; // 13.02:1 on secondary
-$tertiary: #ffe9c2; // 14.39:1 with on-tertiary
-$on-tertiary: #1a1c1e; // 14.39:1 on tertiary
-$error: #b3261e; // 6.54:1 with on-error
-$on-error: #ffffff; // 6.54:1 on error
-$outline: #5f6368; // 6.05:1 on surface
-$outline-variant: #6b7075; // 4.50:1 on surface-container
-$inverse-surface: #2b3134; // 13.19:1 with on-inverse-surface
-$on-inverse-surface: #ffffff; // 13.19:1
+$on-surface: #1a1c1e; // 17.09:1 with $surface
+$on-surface-variant: #41474d; // 9.40:1 with $surface
+$primary: #00565b; // 8.46:1 with $surface
+$on-primary: #ffffff; // 8.46:1 with $primary
+$primary-hover: #003f43; // 11.72:1 with $on-primary
+$primary-active: #002f32; // 14.46:1 with $on-primary
+$primary-outline: #5f8f91; // 3.61:1 with $surface - non-text boundary only
+$secondary: #d7e3e4; // 13.02:1 with $on-secondary
+$on-secondary: #1a1c1e; // 13.02:1 with $secondary
+$tertiary: #ffe9c2; // 14.39:1 with $on-tertiary
+$on-tertiary: #1a1c1e; // 14.39:1 with $tertiary
+$error: #b3261e; // 6.54:1 with $on-error
+$on-error: #ffffff; // 6.54:1 with $error
+$error-hover: #8c1d18; // 9.11:1 with $on-error
+$error-active: #6e1713; // 11.70:1 with $on-error
+$error-outline: #b05c55; // 4.66:1 with $surface - non-text boundary only
+$success: #1b6b3a; // 6.54:1 with $on-success
+$on-success: #ffffff; // 6.54:1 with $success
+$success-hover: #14522c; // 9.24:1 with $on-success
+$success-active: #0e3d20; // 12.30:1 with $on-success
+$success-outline: #6f9c7c; // 3.12:1 with $surface - non-text boundary only
+$warning: #8a5200; // 6.39:1 with $on-warning
+$on-warning: #ffffff; // 6.39:1 with $warning
+$warning-hover: #6b3f00; // 8.99:1 with $on-warning
+$warning-active: #522f00; // 11.90:1 with $on-warning
+$warning-outline: #a1743a; // 4.14:1 with $surface - non-text boundary only
+$info: #00506f; // 8.83:1 with $on-info
+$on-info: #ffffff; // 8.83:1 with $info
+$outline: #5f6368; // 6.05:1 with $surface
+$outline-variant: #6b7075; // 4.50:1 with $surface-container
+$inverse-surface: #2b3134; // 13.19:1 with $on-inverse-surface
+$on-inverse-surface: #ffffff; // 13.19:1 with $inverse-surface
+$on-surface-disabled: #6e7276; // 4.85:1 with $surface
+$on-surface-placeholder: #61666b; // 5.80:1 with $surface
+
+// The focus ring, as its own token rather than a reuse of `$primary`.
+//
+// `$primary` cannot serve: a ring in the primary is 1:1 against a filled primary
+// button, which is invisible to the keyboard user who needs it. WCAG 2.4.11 asks
+// whether the indicator is distinguishable from the adjacent colour, and a ring
+// the same colour as what it surrounds fails that by definition.
+//
+// One token is enough, and the reason is worth stating because the opposite looks
+// true: the ring is drawn with `outline-offset: 2px` in `styles.scss`, so it sits
+// *outside* the element's border box. On a filled primary button it is therefore
+// painted on the page background, not on the button fill, and a ring that clears
+// 3:1 against the light surfaces clears it on every control in the app. The two
+// remaining light surfaces - a card and a selected option - are 8.76:1 and
+// 8.30:1 below, so the same value holds on all three without a second token.
+$focus: #3f4548; // 9.74:1 with $surface - non-text boundary only
+
+// A tonal container for a selected state - the background behind a chosen radio
+// option. Distinct from `$surface-container` so "selected" and "unselected but
+// hovered" cannot be confused at a glance, which for the disclosure choice
+// matters more than usual: the reporter has to be able to see which of the two
+// consent options they have picked, and the two options are deliberately the
+// same size and weight (SPEC 3.2 forbids nudging them).
+$primary-container: #e4eff0; // 14.57:1 with $on-surface
+$on-primary-container: #00383c; // 10.98:1 with $primary-container
+
+// The Ant primary tint ramp (`--ant-primary-1` .. `-7`), as a mix toward the
+// surface going lighter and toward black going darker.
+//
+// A ramp, not a set of hand-picked stops. Ant uses 1-3 for large fills behind
+// dark text and 5-7 for pressed states; steps that were chosen by eye are how a
+// ramp ends up with a step nobody measured, and a pressed primary button in an
+// unmeasured step is white text below AA with nothing to catch it.
+$primary-1: #d9e8e9; // 13.57:1 with $on-surface
+$primary-2: #b6d7d9; // 11.16:1 with $on-surface
+$primary-3: #86bcc0; // 8.11:1 with $on-surface
+$primary-4: #4f9ba0; // 5.31:1 with $on-surface
+$primary-5: #00666c; // 6.74:1 with $on-primary
+$primary-6: #00565b; // 8.46:1 with $on-primary
+$primary-7: #00474b; // 10.48:1 with $on-primary
 
 // [foreground, background, minimum ratio, what it is for]
 $contrast-pairs: (
@@ -42,13 +107,72 @@ $contrast-pairs: (
     $on-primary,
     $primary-hover,
     4.5,
-    'that button, hovered or pressed'
+    'that button, hovered'
   ),
+  (
+    'on-primary on primary-active',
+    $on-primary,
+    $primary-active,
+    4.5,
+    'that button, pressed'
+  ),
+  (
+    'on-primary on primary-5',
+    $on-primary,
+    $primary-5,
+    4.5,
+    'a filled button in tint step 5'
+  ),
+  (
+    'on-primary on primary-6',
+    $on-primary,
+    $primary-6,
+    4.5,
+    'a filled button in tint step 6'
+  ),
+  (
+    'on-primary on primary-7',
+    $on-primary,
+    $primary-7,
+    4.5,
+    'a filled button in tint step 7'
+  ),
+  ('on-surface on primary-1', $on-surface, $primary-1, 4.5, 'a selected row wash'),
+  ('on-surface on primary-2', $on-surface, $primary-2, 4.5, 'a hover row wash'),
   ('primary on surface', $primary, $surface, 3.0, 'a primary-coloured icon or link'),
-  ('primary on surface-container', $primary, $surface-container, 4.5, 'a link inside a card'),
+  (
+    'primary on surface-container',
+    $primary,
+    $surface-container,
+    4.5,
+    'a link inside a card'
+  ),
   ('on-secondary on secondary', $on-secondary, $secondary, 4.5, 'a tonal chip'),
   ('on-tertiary on tertiary', $on-tertiary, $tertiary, 4.5, 'a priority accent chip'),
   ('on-error on error', $on-error, $error, 4.5, 'an error banner'),
+  ('on-error on error-hover', $on-error, $error-hover, 4.5, 'that banner, hovered'),
+  (
+    'on-error on error-active',
+    $on-error,
+    $error-active,
+    4.5,
+    'that banner, pressed'
+  ),
+  (
+    'on-success on success',
+    $on-success,
+    $success,
+    4.5,
+    'a submitted or resolved chip'
+  ),
+  (
+    'on-warning on warning',
+    $on-warning,
+    $warning,
+    4.5,
+    'a priority accent chip'
+  ),
+  ('on-info on info', $on-info, $info, 4.5, 'an informational banner'),
   ('outline on surface', $outline, $surface, 3.0, 'a divider or focus ring'),
   (
     'outline-variant on surface-container',
@@ -63,5 +187,66 @@ $contrast-pairs: (
     $inverse-surface,
     4.5,
     'a snackbar or tooltip'
+  ),
+  (
+    'on-surface-disabled on surface',
+    $on-surface-disabled,
+    $surface,
+    4.5,
+    'a disabled control label'
+  ),
+  (
+    'on-surface-placeholder on surface',
+    $on-surface-placeholder,
+    $surface,
+    4.5,
+    'a field placeholder'
+  ),
+  (
+    'primary-outline on surface',
+    $primary-outline,
+    $surface,
+    3.0,
+    'a focus ring on a filled button'
+  ),
+  // The focus ring is asserted against every light surface it can land on, not
+  // just the page background. WCAG 2.4.11 asks whether the indicator is visible
+  // against the adjacent colour, and a ring that clears 3:1 on white while
+  // sitting on a selected option is the failure this catches.
+  //
+  // There is deliberately no `focus on primary` row. The ring is drawn with
+  // `outline-offset: 2px`, so on a filled button it is painted on the page
+  // background rather than on the fill, and a ring that clears the light
+  // surfaces clears it there too. A future change that removes the offset would
+  // put the ring on the button, and this list is where the second colour would
+  // have to be added.
+  ('focus on surface', $focus, $surface, 3.0, 'a focus ring on a page'),
+  (
+    'focus on surface-container',
+    $focus,
+    $surface-container,
+    3.0,
+    'a focus ring on a card'
+  ),
+  (
+    'focus on primary-container',
+    $focus,
+    $primary-container,
+    3.0,
+    'a focus ring on a selected option'
+  ),
+  (
+    'on-primary-container on primary-container',
+    $on-primary-container,
+    $primary-container,
+    4.5,
+    'a selected disclosure option'
+  ),
+  (
+    'on-surface on primary-container',
+    $on-surface,
+    $primary-container,
+    4.5,
+    'a note inside a selected option'
   ),
 );

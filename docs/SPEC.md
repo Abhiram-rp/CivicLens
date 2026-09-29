@@ -35,7 +35,7 @@
 
 | Layer | Choice | Pinned |
 |---|---|---|
-| Frontend | Angular + Angular Material, standalone components, Signals, RxJS services, **no NgRx** | Angular / Material / CLI **22.2.0**, Node 24 |
+| Frontend | Angular + NG-ZORRO, standalone components, Signals, RxJS services, **no NgRx** | Angular / CLI **22.2.0**, ng-zorro-antd **22.1.1**, Node 24 |
 | Maps | Leaflet + OpenStreetMap | latest |
 | Backend | Java + Spring Boot (Web MVC, Security, Data JPA, Validation, Actuator) | **Java 21** toolchain, **Spring Boot 4.1.x** |
 | API docs | springdoc-openapi (Swagger UI) | **3.1.x** (the supported pairing for Boot 4) |
@@ -509,7 +509,7 @@ Normalization is server-side because the mobile app's images are the largest, EX
 
 ## 14. Frontend
 
-Angular 22, standalone components, lazy-loaded routes, Signals for local/UI state, RxJS `BehaviorSubject` services for session state, **no NgRx**. Reactive forms with typed groups and backend-mirrored validation. Angular Material with an **explicitly defined accessible theme** — Material's defaults do not meet WCAG 2.1 AA, and AA on citizen flows is a launch gate. Leaflet + OpenStreetMap for the map picker, with GPS coordinates as the primary input path on every device.
+Angular 22, standalone components, lazy-loaded routes, Signals for local/UI state, RxJS `BehaviorSubject` services for session state, **no NgRx**. Reactive forms with typed groups and backend-mirrored validation. NG-ZORRO with an **explicitly defined accessible theme** — the stock Ant palette does not meet WCAG 2.1 AA, and AA on citizen flows is a launch gate. The theme is a measured token set in `web/src/styles/_tokens.scss`, mapped onto the library's `--ant-*` custom properties in `web/src/styles/_civiclens-theme.scss`, and asserted by `web/src/app/theme.spec.ts`, which computes the real contrast ratios so a token comment cannot drift from the token's value. Leaflet + OpenStreetMap for the map picker, with GPS coordinates as the primary input path on every device.
 
 ```
 src/app/

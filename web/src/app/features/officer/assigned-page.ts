@@ -1,5 +1,4 @@
 import { Component } from '@angular/core';
-import { OfficerShell } from '../../layouts/officer-shell';
 import { NotYet } from '../../shared/not-yet';
 
 /**
@@ -13,11 +12,9 @@ import { NotYet } from '../../shared/not-yet';
  */
 @Component({
   selector: 'app-assigned-page',
-  imports: [OfficerShell, NotYet],
+  imports: [NotYet],
   template: `
-    <app-officer-shell>
-      <app-not-yet [phase]="'P2'" [operations]="operations" />
-    </app-officer-shell>
+    <app-not-yet [phase]="'P2'" [operations]="operations" />
   `,
 })
 export class AssignedPage {

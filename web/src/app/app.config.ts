@@ -4,21 +4,35 @@ import {
   inject,
   provideAppInitializer,
   provideBrowserGlobalErrorListeners,
-  provideZoneChangeDetection,
+  provideZonelessChangeDetection,
 } from '@angular/core';
 import { provideRouter, withComponentInputBinding, withInMemoryScrolling } from '@angular/router';
 import { routes } from './app.routes';
 import { configureApiClient } from './core/api/api-client.config';
+import { civiclensNgZorroProviders } from './ui/ng-zorro.providers';
 
 export const appConfig: ApplicationConfig = {
   providers: [
     provideBrowserGlobalErrorListeners(),
 
-    // Zone change detection is the default, but it is stated rather than
-    // inherited: SPEC 14 leans on Signals, and the interaction between
-    // signal-based UI state and zone scheduling is worth being explicit about at
-    // the one place a reader can see it.
-    provideZoneChangeDetection({ eventCoalescing: true }),
+    // Zoneless change detection, stated explicitly.
+    //
+    // This used to be `provideZoneChangeDetection({ eventCoalescing: true })`,
+    // which is the setting the CLI writes when Zone.js is present. It is not
+    // present: zone.js is not a dependency and there are no polyfills, so Angular
+    // threw `NG0908: In this configuration Angular requires Zone.js` during
+    // bootstrap and the application rendered an empty `<app-root>`.
+    //
+    // Nothing caught that, because `app.spec.ts` builds the `App` component in
+    // isolation and never goes through `bootstrapApplication` with this config.
+    // The whole application had never been loaded in a browser.
+    //
+    // Zoneless is also the better answer on the merits rather than the only one.
+    // Angular 22 is zoneless by default, SPEC 14 leans on Signals for local and UI
+    // state, and a citizen is not served by a `patchEvent`-and-hope scheduler. A
+    // component that needs a change-detection tick has to say so, by reading a
+    // signal - which is the behaviour the spec asks for anyway.
+    provideZonelessChangeDetection(),
 
     // Installs the interceptor chain on the generated client, before any
     // component or route can issue a request, so no code path can reach it with
@@ -49,5 +63,13 @@ export const appConfig: ApplicationConfig = {
       // navigating away from a long report and returning expects.
       withInMemoryScrolling({ scrollPositionRestoration: 'enabled' }),
     ),
+
+    // --- NG-ZORRO (Ant Design for Angular), per REQUIREMENTS.md 34 ----------
+    //
+    // Locale, icon allowlist, component defaults and the disabled press ripple,
+    // each with its reasoning. Exported rather than inlined so the specs that
+    // render a shell can supply the identical configuration - a test that
+    // renders an `nz-icon` without `provideNzIcons` does not fail, it hangs.
+    ...civiclensNgZorroProviders,
   ],
 };

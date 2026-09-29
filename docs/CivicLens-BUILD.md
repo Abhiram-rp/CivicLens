@@ -38,8 +38,8 @@ Since a mobile app is planned, the backend and even the Angular app must be buil
 
 | Layer | Choice | Why (short) |
 |---|---|---|
-| Frontend (web) | Angular (TS) + Angular Material + RxJS + Signals | Team target skillset; no NgRx (justified in ADR) |
-| Backend | Java 21 + Spring Boot 3.x | Target skillset; mature ecosystem |
+| Frontend (web) | Angular (TS) + NG-ZORRO (`ng-zorro-antd` 22.1.1) + RxJS + Signals | Team target skillset; no NgRx (justified in ADR) |
+| Backend | Java 21 + Spring Boot 4.1.x | Target skillset; mature ecosystem |
 | Auth | Spring Security + JWT (access+refresh) | Stateless, mobile-compatible |
 | Database | PostgreSQL 16 + pgvector extension | Relational integrity + embeddings in one store |
 | Messaging | RabbitMQ | Decouples AI/notification latency from request path |

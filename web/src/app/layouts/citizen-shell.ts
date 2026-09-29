@@ -1,4 +1,5 @@
 import { Component } from '@angular/core';
+import { RouterOutlet } from '@angular/router';
 import { AppShell } from './app-shell';
 
 /**
@@ -10,23 +11,28 @@ import { AppShell } from './app-shell';
  * shell's signed-in variant - a link a signed-out visitor cannot use is a dead
  * end, and dead ends on a civic service cost trust.
  */
-@Component({
-  selector: 'app-citizen-shell',
-  imports: [AppShell],
-  template: `
-    <app-shell
-      navLabel="Citizen"
-      heading="CivicLens"
-      [links]="links"
-    >
-      <ng-content />
-    </app-shell>
-  `,
-})
+  @Component({
+    selector: 'app-citizen-shell',
+    imports: [AppShell, RouterOutlet],
+    template: `
+      <app-shell
+        navLabel="Citizen"
+        heading="CivicLens"
+        [links]="links"
+      >
+        <router-outlet />
+      </app-shell>
+    `,
+  })
 export class CitizenShell {
+  /**
+   * Nav items. Icons come from the `ui/icons.ts` allowlist; an unregistered name
+   * renders as an empty box rather than an error, which is what
+   * `ui-icon-registration.spec.ts` exists to catch.
+   */
   readonly links = [
-    { path: '/report', label: 'Report an issue', exact: true },
-    { path: '/tracked', label: 'Track a report' },
-    { path: '/public', label: 'Public reports' },
+    { path: '/report', label: 'Report an issue', icon: 'plus', exact: true },
+    { path: '/tracked', label: 'Track a report', icon: 'file-search' },
+    { path: '/public', label: 'Public reports', icon: 'search' },
   ];
 }

@@ -1,5 +1,7 @@
 import { Component, input } from '@angular/core';
 import { RouterLink, RouterLinkActive } from '@angular/router';
+import { NzIconModule } from 'ng-zorro-antd/icon';
+import { NzMenuModule } from 'ng-zorro-antd/menu';
 
 /**
  * The frame every screen renders inside.
@@ -8,6 +10,21 @@ import { RouterLink, RouterLinkActive } from '@angular/router';
  * furniture, so the furniture lives here once. Duplicating the skip link and
  * landmark structure four times is how one of the copies quietly loses its
  * `aria-label` and nobody notices until a screen-reader audit.
+ *
+ * The navigation is NG-ZORRO's `nz-menu` rather than a hand-rolled `<ul>`. That
+ * choice was checked rather than assumed: `nz-menu` renders a plain
+ * `<ul class="ant-menu">` of `<li class="ant-menu-item">` with the link inside a
+ * `span.ant-menu-title-content`, and it adds no `role="menu"`, no
+ * `role="menuitem"` and no `aria-current` of its own. So the list semantics and
+ * the link roles are exactly what they were, and the accessible name still comes
+ * from the surrounding `<nav>`.
+ *
+ * Worth naming because it is the usual reason to avoid `nz-menu` on a public
+ * site. A library menu that stamped `role="menu"` onto a group of site links
+ * would be actively wrong - that role tells a screen reader the links are
+ * application commands with arrow-key navigation, not a navigation landmark -
+ * and the shell-wiring tests below would not have caught it, because a role
+ * change is not a DOM structure change. Measured first, then adopted.
  *
  * Accessibility notes that apply to all four shells:
  *
@@ -18,10 +35,14 @@ import { RouterLink, RouterLinkActive } from '@angular/router';
  *   can jump between regions instead of reading linearly.
  * - `<main>` carries the page title as its own heading, so every page has
  *   exactly one `h1` and the document outline is never empty.
+ * - `aria-current="page"` is set on the active link by hand. `nz-menu` tracks its
+ *   own `ant-menu-item-selected` class for styling but does not expose
+ *   `aria-current`, so a screen reader would otherwise have no way to tell a
+ *   citizen which of three links they are on.
  */
 @Component({
   selector: 'app-shell',
-  imports: [RouterLink, RouterLinkActive],
+  imports: [RouterLink, RouterLinkActive, NzIconModule, NzMenuModule],
   template: `
     <a class="skip-link" href="#main-content">Skip to main content</a>
 
@@ -32,17 +53,23 @@ import { RouterLink, RouterLinkActive } from '@angular/router';
       </a>
 
       <nav class="app-nav" [attr.aria-label]="navLabel()">
-        <ul>
+        <ul nz-menu nzMode="horizontal">
           @for (link of links(); track link.path) {
-            <li>
+            <li nz-menu-item>
               <a
                 [routerLink]="link.path"
-                routerLinkActive="active"
+                routerLinkActive="ant-menu-item-selected"
                 [routerLinkActiveOptions]="{ exact: link.exact ?? false }"
                 #rla="routerLinkActive"
                 [attr.aria-current]="rla.isActive ? 'page' : null"
               >
-                {{ link.label }}
+                <span
+                  nz-icon
+                  [nzType]="link.icon"
+                  nzTheme="outline"
+                  aria-hidden="true"
+                ></span>
+                <span class="nav-label">{{ link.label }}</span>
               </a>
             </li>
           }
@@ -115,28 +142,59 @@ import { RouterLink, RouterLinkActive } from '@angular/router';
       letter-spacing: 0.02em;
     }
 
+    /* The library's own list reset, kept. nz-menu styles the list but the
+       header is a flex row, so the menu has to be allowed to grow. */
     .app-nav ul {
-      display: flex;
       flex-wrap: wrap;
-      gap: 0.25rem 1rem;
-      list-style: none;
-      margin: 0;
-      padding: 0;
+      row-gap: 0;
+    }
+
+    .app-nav li {
+      display: flex;
     }
 
     .app-nav a {
-      display: inline-block;
-      padding: 0.5rem 0.25rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
       color: var(--cl-on-surface);
       text-decoration: none;
-      border-bottom: 2px solid transparent;
     }
 
-    /* Material's own focus-visible rule is global (see styles.scss); this is the
-       nav-specific "you are here" treatment on top. */
-    .app-nav a.active {
-      border-bottom-color: var(--cl-primary);
+    /* Horizontal nz-menu underlines the selected item; the focus-visible rule
+       in styles.scss is global, and this is the nav-specific "you are here"
+       treatment on top of it. The colour is set here because the library's
+       selected state inherits from the theme override in _civiclens-theme.scss,
+       and the nav sits on the surface token rather than the ant body token. */
+    .app-nav a.ant-menu-item-selected {
+      color: var(--cl-primary);
       font-weight: 600;
+    }
+
+    /* Pointer-only suppression of the icon's own baseline gap. A 0-width icon
+       span inside a flex link otherwise reserves a phantom 14px. */
+    .app-nav a:hover [nz-icon] {
+      opacity: 0.85;
+    }
+
+    /* The label is the link's accessible name, so it is never hidden from a
+       screen reader. Only the visual redundancy of a short label is removed,
+       and only on the narrow screens where the three links stop fitting. */
+    @media (max-width: 30rem) {
+      .nav-label {
+        position: absolute;
+        inline-size: 1px;
+        block-size: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+      }
+
+      /* With the text visually hidden the icon is the only thing that can carry
+         the item, so the link needs a real target and a visible state. */
+      .app-nav a {
+        padding: 0.5rem;
+      }
     }
 
     main {
@@ -177,7 +235,16 @@ export class AppShell {
   /** The single `h1` for the page. */
   readonly heading = input.required<string>();
 
+  /**
+   * The nav items.
+   *
+   * `icon` is required rather than optional because `nz-icon` renders an empty
+   * inline-block for an unregistered name instead of throwing, so a link with no
+   * icon would look like a layout bug with no error anywhere. `ui-icon-registration.spec.ts`
+   * fails on any `nzType` that is not in the allowlist, which is what catches a
+   * typo here; the type is what stops it being optional in the first place.
+   */
   readonly links = input.required<
-    ReadonlyArray<{ path: string; label: string; exact?: boolean }>
+    ReadonlyArray<{ path: string; label: string; icon: string; exact?: boolean }>
   >();
 }

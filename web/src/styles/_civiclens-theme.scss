@@ -1,131 +1,185 @@
-// CivicLens theme - an EXPLICIT accessible palette, not a Material default.
+// CivicLens theme - an EXPLICIT accessible palette layered over NG-ZORRO.
 //
-// SPEC.md 14 requires an "explicitly defined accessible theme" because
-// Material's shipped defaults do not meet WCAG 2.1 AA, and REQUIREMENTS.md 8
-// makes AA on citizen flows a launch gate. A comment claiming a palette is
-// accessible is not a check, so every value lives in `_tokens.scss` and
-// `theme.spec.ts` measures each pair against its declared floor. Editing a
-// colour to something that fails fails the build rather than the launch.
+// SPEC.md 14 and REQUIREMENTS.md 8 make WCAG 2.1 AA on citizen flows a launch
+// gate, and REQUIREMENTS.md 34 names NG-ZORRO as the UI kit. Those two together
+// are the whole problem this file exists for: **NG-ZORRO's shipped palette is not
+// AA.** Measured, not assumed - `theme.spec.ts` computes these same ratios from
+// the shipped stylesheet and fails the build if a default is ever left in place:
+//
+//   white on --ant-primary-color (#1890ff)   3.24:1   needs 4.5:1
+//   white on --ant-warning-color (#faad14)   1.90:1   needs 4.5:1
+//   white on --ant-success-color (#52c41a)   2.27:1   needs 4.5:1
+//   white on --ant-error-color (#f5222d)     4.08:1   needs 4.5:1
+//   #8c8c8c secondary text on white          3.36:1   needs 4.5:1
+//
+// Every one of those is a value the library ships in `ng-zorro-antd.min.css`, and
+// every one of them would put white text or grey body copy below AA on a page a
+// citizen reads to find out whether a pothole is being fixed. So the palette is
+// chosen here, from `_tokens.scss`, and NG-ZORRO is themed to match rather than
+// the other way round.
+//
+// WHY A CSS-CUSTOM-PROPERTY OVERRIDE AND NOT LESS
+//
+// NG-ZORRO's documented theming path is Less variables, which is the right
+// answer for most projects. It is the wrong answer here, for one specific
+// reason: `@primary-color: ...` has to be written *before* the library is
+// imported, in a Less file, and it is a fourth hand-maintained copy of the
+// palette. `_tokens.scss` is the single source of truth, `theme.spec.ts` measures
+// it, and a Less file would not be read by that test at all - so the colours
+// that get measured and the colours that get rendered would be two different
+// files, and the gate would be measuring fiction.
+//
+// The `variable` build of the stylesheet exposes `--ant-primary-color` and its
+// relatives as real custom properties, which means the override is *CSS
+// referencing the same token file*. One source, and the measurement in
+// `theme.spec.ts` covers what actually paints.
+//
+// The two AA-critical Ant defaults that have no custom property - secondary text
+// and the washed-out link colour - are handled by explicit component-level rules
+// further down, with the reason stated at each one.
 
-@use '@angular/material' as mat;
 @use 'tokens' as t;
 
-// Tonal steps assembled from the explicit tokens, rather than
-// mat.$azure-palette. M3 would otherwise derive every on-* pairing from the
-// base hue, and a derived pairing is precisely the value that drifts below AA
-// when someone nudges the hue. Here the light steps are chosen, not computed.
-$_primary: (
-  0: #ffffff,
-  10: #c7e9ea,
-  20: #a8d5d7,
-  30: #85bec1,
-  40: #5fa8ab,
-  50: #379396,
-  60: t.$primary, // 8.46:1 against white
-  70: #00474b,
-  80: t.$primary-hover, // hover/active, 11.72:1
-  90: #002f32,
-  95: #001f21,
-  100: #000000,
-);
+// The `--ant-*` names below are the complete set the `variable` build reads for
+// the semantic colours. `primary-1` .. `primary-7` are the tint ramp Ant uses for
+// hover washes and selected-row backgrounds, so they are mapped too: leaving them
+// at the blue defaults would put a blue wash behind a row next to a teal button.
+@mixin civiclens-antd-theme() {
+  // --- Primary: a civic teal, chosen for its contrast, not its hue ---------
+  // 8.46:1 with white. The default #1890ff gives 3.24:1.
+  --ant-primary-color: #{t.$primary};
+  --ant-primary-color-hover: #{t.$primary-hover};
+  --ant-primary-color-active: #{t.$primary-active};
+  --ant-primary-color-outline: #{t.$primary-outline};
 
-$_secondary: (
-  0: #ffffff,
-  10: t.$secondary, // 13.02:1 with on-secondary
-  20: #bbc8c9,
-  30: #9eadad,
-  40: #839495,
-  50: #6d7d7e,
-  60: #586769,
-  70: #465355,
-  80: #383f41,
-  90: #262a2c,
-  95: #1d2122,
-  100: #000000,
-);
+  // The tint ramp. Each step is a mix toward the surface rather than an
+  // arbitrary stop, so the ramp stays in the same hue and a hover wash cannot
+  // drift to a colour that was never measured. Steps 1-3 back off the
+  // background and so are only ever used for large fills behind dark text;
+  // steps 5-7 are pressed states, and the darkest of them is the only one that
+  // can carry white text.
+  --ant-primary-1: #{t.$primary-1};
+  --ant-primary-2: #{t.$primary-2};
+  --ant-primary-3: #{t.$primary-3};
+  --ant-primary-4: #{t.$primary-4};
+  --ant-primary-5: #{t.$primary-5};
+  --ant-primary-6: #{t.$primary-6};
+  --ant-primary-7: #{t.$primary-7};
 
-$_tertiary: (
-  0: #ffffff,
-  10: t.$tertiary, // 14.39:1 with on-tertiary - priority accents
-  20: #ffdc9e,
-  30: #fdc26c,
-  40: #d99b2b,
-  50: #b37700,
-  60: #8f5f00,
-  70: #764d00,
-  80: #5f3e00,
-  90: #4d3200,
-  95: #402900,
-  100: #000000,
-);
+  // --- Error: an AA red ---------------------------------------------------
+  // 6.54:1 with white. The default #f5222d gives 4.08:1, which is below the
+  // 4.5:1 floor for the error text in a banner - and an error banner that fails
+  // contrast is the one place a citizen is guaranteed to be looking.
+  --ant-error-color: #{t.$error};
+  --ant-error-color-hover: #{t.$error-hover};
+  --ant-error-color-active: #{t.$error-active};
+  --ant-error-color-outline: #{t.$error-outline};
+  --ant-error-color-deprecated-bg: #{t.$error};
+  --ant-error-color-deprecated-border: #{t.$error};
 
-$_error: (
-  0: #ffffff,
-  10: #ffdad6,
-  20: #ffb4ab,
-  30: #ff897d,
-  40: #ff544a,
-  50: #de2e21,
-  60: t.$error, // 6.54:1 with on-error
-  70: #93150e,
-  80: #77070a,
-  90: #610006,
-  95: #4c0008,
-  100: #000000,
-);
+  // --- Success ------------------------------------------------------------
+  // Used for "report submitted" and resolved-status chips. 4.62:1 with white;
+  // the default #52c41a gives 2.27:1, which is not text-legible at any size.
+  --ant-success-color: #{t.$success};
+  --ant-success-color-hover: #{t.$success-hover};
+  --ant-success-color-active: #{t.$success-active};
+  --ant-success-color-outline: #{t.$success-outline};
+  --ant-success-color-deprecated-bg: #{t.$success};
+  --ant-success-color-deprecated-border: #{t.$success};
 
-@mixin civiclens-theme() {
-  @include mat.theme(
-    (
-      color: (
-        primary: $_primary,
-        secondary: $_secondary,
-        tertiary: $_tertiary,
-        error: $_error,
-      ),
-      typography: Roboto,
-      density: 0,
-    )
-  );
+  // --- Warning / tertiary -------------------------------------------------
+  // The priority accents. Deliberately *not* a yellow: Ant's #faad14 gives
+  // 1.90:1 with white, and darkening a yellow far enough to pass 4.5:1 stops
+  // being yellow. The amber below is a deep bronze that keeps the "attention"
+  // reading at 5.36:1.
+  --ant-warning-color: #{t.$warning};
+  --ant-warning-color-hover: #{t.$warning-hover};
+  --ant-warning-color-active: #{t.$warning-active};
+  --ant-warning-color-outline: #{t.$warning-outline};
+  --ant-warning-color-deprecated-bg: #{t.$warning};
+  --ant-warning-color-deprecated-border: #{t.$warning};
 
-  // Explicit overrides for the system tokens the citizen flows depend on. M3's
-  // derived defaults are not assumed to be AA: they are computed from the base
-  // hue and were never designed against a contrast requirement.
-  @include mat.theme-overrides(
-    (
-      on-surface: t.$on-surface,
-      on-surface-variant: t.$on-surface-variant,
-      outline: t.$outline,
-      outline-variant: t.$outline-variant,
-      primary: t.$primary,
-      on-primary: t.$on-primary,
-      error: t.$error,
-      on-error: t.$on-error,
-      tertiary: t.$tertiary,
-      on-tertiary: t.$on-tertiary,
-      secondary: t.$secondary,
-      on-secondary: t.$on-secondary,
-      inverse-surface: t.$inverse-surface,
-      on-inverse-surface: t.$on-inverse-surface,
-    )
-  );
+  // --- Info ---------------------------------------------------------------
+  --ant-info-color: #{t.$info};
+  --ant-info-color-deprecated-bg: #{t.$info};
+  --ant-info-color-deprecated-border: #{t.$info};
 
-  // A project-owned vocabulary for application CSS.
-  //
-  // Components reach for `--cl-*` rather than `--mat-sys-*` so that a Material
-  // upgrade, which is free to rename or re-derive system tokens, does not reach
-  // into every template. The values are the same SCSS variables the Material
-  // overrides above use, so this cannot drift from the palette: there is one
-  // source, `_tokens.scss`, and `theme.spec.ts` measures it.
-  //
-  // `surface-container` and `outline-variant` are the two the app needs most and
-  // that M3 does not define a system token for, so they come straight from the
-  // tokens file.
-  @include civiclens-colors();
+  // --- Chrome -------------------------------------------------------------
+  --antd-wave-shadow-color: #{t.$primary};
+  --scroll-bar: #{t.$outline};
 }
 
-/// Emitted on `:root` by `styles.scss`. Kept as its own mixin so the mapping is
-/// written once and referenced by both the theme and the global styles.
+/// NG-ZORRO colours with no custom property in the `variable` build.
+///
+/// Each of these is a shipped default that fails AA, so each is overridden by
+/// hand and each states what it was. Grouped here rather than scattered through
+/// the app stylesheet so the full list of hand-patched defaults is readable in
+/// one place - a value that had to be patched by selector is a value that a
+/// library upgrade can silently revert.
+@mixin civiclens-antd-overrides() {
+  // Secondary text. Ant ships `rgba(0, 0, 0, 0.65)` on white, which is 3.36:1
+  // for the resolved grey and sits below the 4.5:1 floor for body-adjacent
+  // copy. `on-surface-variant` is 9.40:1.
+  .ant-typography-secondary,
+  .ant-list-item-meta-description,
+  .ant-descriptions-item-label,
+  .ant-form-item-extra {
+    color: var(--cl-on-surface-variant);
+  }
+
+  // Links. Ant's link colour is the primary at reduced opacity, which lands
+  // around 3.1:1 on white - fine for a large graphic, not for the underlined
+  // body-size link text a citizen has to read.
+  .ant-btn-link,
+  .ant-typography a,
+  a {
+    color: var(--cl-primary);
+  }
+
+  .ant-btn-link:hover,
+  .ant-typography a:hover,
+  a:hover {
+    color: var(--cl-primary-hover);
+  }
+
+  // The default focus ring on Ant components is a 2px outline in the primary,
+  // which passes on our primary. Left alone deliberately - overriding it would
+  // be the one edit here that could make a keyboard user *worse* off.
+
+  // Ant's disabled text is 0.25 alpha. That is below AA by a wide margin, and it
+  // is a genuine problem rather than a cosmetic one: a disabled submit button is
+  // how a form says "you are not finished", and if the label cannot be read, the
+  // citizen does not know why. Darkened to a measured 4.62:1 - still visibly
+  // inactive next to the 17.09:1 enabled label, and legible.
+  .ant-btn[disabled],
+  .ant-btn[disabled]:hover,
+  .ant-select-disabled .ant-select-selection-placeholder,
+  .ant-input[disabled],
+  .ant-input[disabled]:hover {
+    color: var(--cl-on-surface-disabled);
+  }
+
+  .ant-btn[disabled] {
+    background: var(--cl-surface-container);
+    border-color: var(--cl-outline-variant);
+  }
+
+  // Placeholder text. Same problem, same reason. A placeholder is often the only
+  // instruction a field gives.
+  .ant-input::placeholder,
+  .ant-input-affix-wrapper input::placeholder,
+  .ant-select-selection-placeholder {
+    color: var(--cl-on-surface-placeholder);
+  }
+}
+
+/// The project-owned vocabulary for application CSS.
+///
+    /// Components reach for `var(--cl-*)` rather than `var(--ant-*)` because an
+    /// NG-ZORRO upgrade is free to rename or re-derive its custom properties, and
+    /// that should not reach into every template. The values are the same SCSS variables the
+/// `--ant-*` overrides above use, so the two cannot drift - one source in
+/// `_tokens.scss`, measured by `theme.spec.ts`.
 @mixin civiclens-colors() {
   --cl-surface: #{t.$surface};
   --cl-surface-container: #{t.$surface-container};
@@ -133,6 +187,8 @@ $_error: (
   --cl-on-surface-variant: #{t.$on-surface-variant};
   --cl-primary: #{t.$primary};
   --cl-primary-hover: #{t.$primary-hover};
+  --cl-primary-active: #{t.$primary-active};
+  --cl-primary-outline: #{t.$primary-outline};
   --cl-on-primary: #{t.$on-primary};
   --cl-secondary: #{t.$secondary};
   --cl-on-secondary: #{t.$on-secondary};
@@ -140,8 +196,46 @@ $_error: (
   --cl-on-tertiary: #{t.$on-tertiary};
   --cl-error: #{t.$error};
   --cl-on-error: #{t.$on-error};
+  --cl-error-hover: #{t.$error-hover};
+  --cl-error-active: #{t.$error-active};
+  --cl-error-outline: #{t.$error-outline};
+  --cl-success: #{t.$success};
+  --cl-on-success: #{t.$on-success};
+  --cl-success-hover: #{t.$success-hover};
+  --cl-success-active: #{t.$success-active};
+  --cl-success-outline: #{t.$success-outline};
+  --cl-warning: #{t.$warning};
+  --cl-on-warning: #{t.$on-warning};
+  --cl-warning-hover: #{t.$warning-hover};
+  --cl-warning-active: #{t.$warning-active};
+  --cl-warning-outline: #{t.$warning-outline};
+  --cl-info: #{t.$info};
+  --cl-on-info: #{t.$on-info};
   --cl-outline: #{t.$outline};
   --cl-outline-variant: #{t.$outline-variant};
   --cl-inverse-surface: #{t.$inverse-surface};
   --cl-on-inverse-surface: #{t.$on-inverse-surface};
+  --cl-on-surface-disabled: #{t.$on-surface-disabled};
+  --cl-on-surface-placeholder: #{t.$on-surface-placeholder};
+
+  // The focus ring and the selected-state container. Kept as CivicLens tokens
+  // rather than left as raw hex in components, because `$focus` in particular
+  // is asserted against four different surfaces in `_tokens.scss` and a
+  // hand-picked value in a template would be a colour no test measures.
+  --cl-focus: #{t.$focus};
+  --cl-primary-container: #{t.$primary-container};
+  --cl-on-primary-container: #{t.$on-primary-container};
+
+  // The Ant primary tint ramp, exposed so application CSS can reach the same
+  // washes NG-ZORRO uses. A selected row that reaches for `--ant-primary-1`
+  // while its own hover state uses `--cl-primary-*` is two palettes in one
+  // component, and the row looks broken only at the moment the user interacts
+  // with it.
+  --cl-primary-1: #{t.$primary-1};
+  --cl-primary-2: #{t.$primary-2};
+  --cl-primary-3: #{t.$primary-3};
+  --cl-primary-4: #{t.$primary-4};
+  --cl-primary-5: #{t.$primary-5};
+  --cl-primary-6: #{t.$primary-6};
+  --cl-primary-7: #{t.$primary-7};
 }

@@ -1,4 +1,5 @@
 import { Component } from '@angular/core';
+import { RouterOutlet } from '@angular/router';
 import { AppShell } from './app-shell';
 
 /**
@@ -13,21 +14,21 @@ import { AppShell } from './app-shell';
  * things an administrator most often needs are "who is in the system" and "what
  * did they do".
  */
-@Component({
-  selector: 'app-admin-shell',
-  imports: [AppShell],
-  template: `
-    <app-shell navLabel="Administrator" heading="Configuration" [links]="links">
-      <ng-content />
-    </app-shell>
-  `,
-})
+  @Component({
+    selector: 'app-admin-shell',
+    imports: [AppShell, RouterOutlet],
+    template: `
+      <app-shell navLabel="Administrator" heading="Configuration" [links]="links">
+        <router-outlet />
+      </app-shell>
+    `,
+  })
 export class AdminShell {
   readonly links = [
-    { path: '/admin/audit-logs', label: 'Audit log', exact: true },
-    { path: '/admin/users', label: 'Users' },
-    { path: '/admin/departments', label: 'Departments' },
-    { path: '/admin/categories', label: 'Categories' },
-    { path: '/admin/sla', label: 'SLA policies' },
+    { path: '/admin/audit-logs', label: 'Audit log', icon: 'file-text', exact: true },
+    { path: '/admin/users', label: 'Users', icon: 'user' },
+    { path: '/admin/departments', label: 'Departments', icon: 'environment' },
+    { path: '/admin/categories', label: 'Categories', icon: 'menu' },
+    { path: '/admin/sla', label: 'SLA policies', icon: 'setting' },
   ];
 }

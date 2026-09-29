@@ -1,5 +1,4 @@
 import { Component } from '@angular/core';
-import { AdminShell } from '../../layouts/admin-shell';
 import { NotYet } from '../../shared/not-yet';
 
 /**
@@ -13,11 +12,9 @@ import { NotYet } from '../../shared/not-yet';
  */
 @Component({
   selector: 'app-sla-page',
-  imports: [AdminShell, NotYet],
+  imports: [NotYet],
   template: `
-    <app-admin-shell>
-      <app-not-yet [phase]="'P1'" [operations]="operations" />
-    </app-admin-shell>
+    <app-not-yet [phase]="'P1'" [operations]="operations" />
   `,
 })
 export class SlaPage {

@@ -1,6 +1,8 @@
-import { TestBed } from '@angular/core/testing';
+import { TestBed, type ComponentFixture } from '@angular/core/testing';
 import { Component } from '@angular/core';
+import { By } from '@angular/platform-browser';
 import { FormControl, FormGroup, ReactiveFormsModule } from '@angular/forms';
+import { NzRadioComponent } from 'ng-zorro-antd/radio';
 import { DisclosureChoice, type DisclosureChoiceValue } from './disclosure-choice';
 import type { Disclosure } from '../api/generated/types.gen';
 
@@ -53,13 +55,48 @@ describe('DisclosureChoice', () => {
     };
   }
 
+  /**
+   * The `Disclosure` value behind each rendered radio, in document order.
+   *
+   * Read off the `NzRadioComponent` instances rather than off a DOM attribute.
+   * `nz-radio` does not put `value` on the inner `<input type="radio">` - the
+   * contract value lives in the component's `nzValue`, which the group matches
+   * against - so the `input[value="SHARE_DETAILS"]` selector this file used
+   * before the NG-ZORRO migration matched nothing, and the "no radio for
+   * SHARE_DETAILS" failures that followed were that rather than a broken
+   * control. Going through `By.directive` is also how a test asks "is there a
+   * radio here" without assuming a particular tag name.
+   *
+   * The point of the migration was that the reporter gets the library's keyboard
+   * contract, and the point of this helper is unchanged by it: the tests still
+   * drive a real rendered radio rather than calling `choose()` directly, so a
+   * binding the browser would never actually update still fails here.
+   */
+  function renderedOptions(fixture: ComponentFixture<HostComponent>): Array<{
+    value: Disclosure;
+    input: HTMLInputElement;
+  }> {
+    return fixture.debugElement
+      .queryAll(By.directive(NzRadioComponent))
+      .map((debugEl) => {
+        const instance = debugEl.componentInstance as NzRadioComponent;
+        const input = debugEl.nativeElement.querySelector('input[type="radio"]') as
+          | HTMLInputElement
+          | null;
+        if (!input) {
+          throw new Error(`the radio for ${String(instance.nzValue)} rendered no input`);
+        }
+        return { value: instance.nzValue as Disclosure, input };
+      });
+  }
+
   /** Click a radio the way a reporter would, and let Angular see it. */
-  function choose(fixture: { detectChanges: () => void }, value: Disclosure, root: () => HTMLElement) {
-    const radio = root().querySelector<HTMLInputElement>(`input[type="radio"][value="${value}"]`);
-    if (!radio) {
+  function choose(fixture: ComponentFixture<HostComponent>, value: Disclosure) {
+    const option = renderedOptions(fixture).find((candidate) => candidate.value === value);
+    if (!option) {
       throw new Error(`no radio for ${value}`);
     }
-    radio.click();
+    option.input.click();
     fixture.detectChanges();
   }
 
@@ -99,6 +136,28 @@ describe('DisclosureChoice', () => {
     }
   });
 
+  it('gives the options the keyboard contract a radio group has to have', async () => {
+    // Why `nz-radio-group` rather than bare inputs. Arrow keys move between
+    // options and the group is one tab stop; a hand-rolled set gets that only if
+    // its author wrote it. A reporter who cannot reach "Keep my identity
+    // concealed" with a keyboard has lost the choice this component exists to
+    // protect, and nothing else on the page would fail.
+    const { root } = await createHarness();
+
+    const group = root().querySelector('.disclosure-options');
+    expect(group?.classList).toContain('ant-radio-group');
+    expect(root().querySelectorAll('label[nz-radio]')).toHaveLength(2);
+
+    // One `name` across the group is what makes the browser treat these as one
+    // control rather than two unrelated radios.
+    const names = new Set(
+      [...root().querySelectorAll<HTMLInputElement>('input[type="radio"]')].map(
+        (input) => input.getAttribute('name'),
+      ),
+    );
+    expect(names.size, 'every radio in the group must share one name').toBe(1);
+  });
+
   it('blocks submission until a choice is made', async () => {
     const { form } = await createHarness();
 
@@ -109,7 +168,7 @@ describe('DisclosureChoice', () => {
   it('emits a shared report with no contact details', async () => {
     const { fixture, form, root } = await createHarness();
 
-    choose(fixture, 'SHARE_DETAILS', root);
+    choose(fixture, 'SHARE_DETAILS');
     form.updateValueAndValidity();
 
     expect(form.valid).toBe(true);
@@ -123,7 +182,7 @@ describe('DisclosureChoice', () => {
     const { fixture, form, root } = await createHarness();
     expect(root().querySelector('input[type="email"]')).toBeNull();
 
-    choose(fixture, 'CONCEALED', root);
+    choose(fixture, 'CONCEALED');
 
     expect(root().querySelector('input[type="email"]')).toBeTruthy();
     // The contract requires a contact channel for a concealed report: a
@@ -135,7 +194,7 @@ describe('DisclosureChoice', () => {
   it('carries the consent marker and a typed email for a concealed report', async () => {
     const { fixture, form, root } = await createHarness();
 
-    choose(fixture, 'CONCEALED', root);
+    choose(fixture, 'CONCEALED');
     typeEmail(fixture, root, 'Reporter@Example.com');
     form.updateValueAndValidity();
 
@@ -153,10 +212,10 @@ describe('DisclosureChoice', () => {
   it('discards the address when the reporter switches back to sharing', async () => {
     const { fixture, form, root } = await createHarness();
 
-    choose(fixture, 'CONCEALED', root);
+    choose(fixture, 'CONCEALED');
     typeEmail(fixture, root, 'Reporter@Example.com');
 
-    choose(fixture, 'SHARE_DETAILS', root);
+    choose(fixture, 'SHARE_DETAILS');
     form.updateValueAndValidity();
 
     // Not "hidden but still populated": the contract rejects `reporterContact`
@@ -171,7 +230,7 @@ describe('DisclosureChoice', () => {
   it('rejects a malformed address rather than sending it', async () => {
     const { fixture, form, root } = await createHarness();
 
-    choose(fixture, 'CONCEALED', root);
+    choose(fixture, 'CONCEALED');
     typeEmail(fixture, root, 'not-an-email');
     form.updateValueAndValidity();
 
@@ -182,12 +241,10 @@ describe('DisclosureChoice', () => {
     // The radios are literal strings, so a contract that gains a mode must not
     // leave this form silently unable to express it. Asserted against the
     // generated type so the two cannot drift.
-    const { root } = await createHarness();
-    const radios = [
-      ...root().querySelectorAll<HTMLInputElement>('input[type="radio"]'),
-    ].map((radio) => radio.value as Disclosure);
+    const { fixture } = await createHarness();
+    const values = renderedOptions(fixture).map((option) => option.value);
 
     const supported: Disclosure[] = ['SHARE_DETAILS', 'CONCEALED'];
-    expect(radios).toEqual(supported);
+    expect(values).toEqual(supported);
   });
 });

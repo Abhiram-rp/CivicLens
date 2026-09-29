@@ -10,6 +10,9 @@ import {
   Validator,
   Validators,
 } from '@angular/forms';
+import { NzRadioModule } from 'ng-zorro-antd/radio';
+import { NzInputModule } from 'ng-zorro-antd/input';
+import { FormsModule } from '@angular/forms';
 import type { Disclosure, ReporterContact } from '../api/generated/types.gen';
 
 /**
@@ -59,7 +62,24 @@ const EMPTY: DisclosureChoiceValue = { disclosure: null };
  */
 @Component({
   selector: 'app-disclosure-choice',
-  imports: [ReactiveFormsModule],
+  // `nz-radio-group` rather than bare `<input type="radio">`, and the reason is
+  // SPEC 3.2 rather than consistency.
+  //
+  // NG-ZORRO's group is a real `ControlValueAccessor` over a native radio group,
+  // so it gets the keyboard contract for free: arrow keys move between options,
+  // Space selects, and the group is a single tab stop. A hand-rolled set of
+  // radios gets arrow-key behaviour only if the author remembers to write it,
+  // and the reporter who cannot reach "Keep my identity concealed" with a
+  // keyboard has been stripped of the choice this component exists to protect.
+  //
+  // `nz-radio` renders its own `<input type="radio">`, so the control is still a
+  // real radio to a screen reader and to `disclosure-choice.spec.ts`.
+  // `FormsModule` as well as `ReactiveFormsModule`: the radio group is bound
+  // with `ngModel`, not `formControl`, because the value it holds is one field
+  // of the contract fragment rather than the fragment itself. The email field
+  // below still uses `formControl`, because that one *is* a `FormControl` this
+  // component owns and validates.
+  imports: [ReactiveFormsModule, FormsModule, NzRadioModule, NzInputModule],
   template: `
     <fieldset class="disclosure">
       <legend class="disclosure-legend">Who should be able to see your details?</legend>
@@ -69,16 +89,21 @@ const EMPTY: DisclosureChoiceValue = { disclosure: null };
         decides who at the council can see who reported a problem.
       </p>
 
-      <div class="disclosure-options" role="radiogroup" [attr.aria-describedby]="introId">
-        <label class="disclosure-option">
-          <input
-            type="radio"
-            name="disclosure"
-            value="SHARE_DETAILS"
-            [checked]="disclosure() === 'SHARE_DETAILS'"
-            [disabled]="isDisabled()"
-            (change)="choose('SHARE_DETAILS')"
-          />
+      <!--
+        The group is bound to a plain signal rather than to the parent form's
+        control: that control's value is the whole contract fragment (disclosure
+        plus reporterContact plus contactDisclosureNote), not a bare Disclosure.
+        The group holds the choice alone and choose() below publishes the rest,
+        which keeps the two concerns from being entangled in one binding.
+      -->
+      <nz-radio-group
+        class="disclosure-options"
+        [ngModel]="disclosure()"
+        (ngModelChange)="choose($event)"
+        [nzDisabled]="isDisabled()"
+        [attr.aria-describedby]="introId"
+      >
+        <label class="disclosure-option" nz-radio [nzValue]="'SHARE_DETAILS'">
           <span class="disclosure-option-body">
             <span class="disclosure-option-title">Show my details</span>
             <span class="disclosure-option-note">
@@ -88,15 +113,7 @@ const EMPTY: DisclosureChoiceValue = { disclosure: null };
           </span>
         </label>
 
-        <label class="disclosure-option">
-          <input
-            type="radio"
-            name="disclosure"
-            value="CONCEALED"
-            [checked]="disclosure() === 'CONCEALED'"
-            [disabled]="isDisabled()"
-            (change)="choose('CONCEALED')"
-          />
+        <label class="disclosure-option" nz-radio [nzValue]="'CONCEALED'">
           <span class="disclosure-option-body">
             <span class="disclosure-option-title">Keep my identity concealed</span>
             <span class="disclosure-option-note">
@@ -106,7 +123,7 @@ const EMPTY: DisclosureChoiceValue = { disclosure: null };
             </span>
           </span>
         </label>
-      </div>
+      </nz-radio-group>
 
       @if (contactErrorId()) {
         <p class="disclosure-error" role="alert" [id]="contactErrorId()">
@@ -116,8 +133,19 @@ const EMPTY: DisclosureChoiceValue = { disclosure: null };
 
       @if (isConcealed()) {
         <div class="disclosure-contact">
-          <label class="disclosure-contact-label" [for]="contactId">Email address for updates</label>
+          <!--
+            A plain label element, and a bare nz-input with no wrapper component.
+
+            NG-ZORRO 22 removed nz-input-group, and the field wrapper is implicit
+            on nz-input. A label is also the right element regardless: the
+            association is what matters, and that is the for/id pair, which
+            NG-ZORRO does not add for us here.
+          -->
+          <label class="disclosure-contact-label" [for]="contactId">
+            Email address for updates
+          </label>
           <input
+            nz-input
             class="disclosure-contact-input"
             [id]="contactId"
             type="email"
@@ -148,7 +176,9 @@ const EMPTY: DisclosureChoiceValue = { disclosure: null };
     }
 
     .disclosure-legend {
-      font: var(--mat-sys-title-medium);
+      font-size: 1.125rem;
+      font-weight: 600;
+      line-height: 1.5;
       padding: 0 0.5rem;
     }
 
@@ -203,7 +233,9 @@ const EMPTY: DisclosureChoiceValue = { disclosure: null };
     }
 
     .disclosure-option-title {
-      font: var(--mat-sys-title-small);
+      font-size: 1rem;
+      font-weight: 600;
+      line-height: 1.5;
     }
 
     .disclosure-option-note {
@@ -224,22 +256,17 @@ const EMPTY: DisclosureChoiceValue = { disclosure: null };
     }
 
     .disclosure-contact-label {
-      font: var(--mat-sys-label-large);
+      font-size: 1rem;
+      font-weight: 600;
+      line-height: 1.5;
     }
 
+    /* The input is NG-ZORRO's, so its border, radius, padding, and focus
+       treatment come from the library and are not restated here. Only the width
+       is ours: an email field at full container width is unreadable on a desktop
+       monitor. */
     .disclosure-contact-input {
-      font: var(--mat-sys-body-large);
-      color: var(--cl-on-surface);
-      background: var(--cl-surface);
-      border: 1px solid var(--cl-outline);
-      border-radius: 4px;
-      padding: 0.625rem 0.75rem;
       max-width: 32rem;
-    }
-
-    .disclosure-contact-input:focus-visible {
-      outline: 2px solid var(--cl-focus);
-      outline-offset: 1px;
     }
 
     .disclosure-contact-help,
@@ -351,7 +378,19 @@ export class DisclosureChoice implements ControlValueAccessor, Validator {
     this.onValidatorChange = fn;
   }
 
-  protected choose(choice: Disclosure): void {
+  /**
+   * Called by the `nz-radio-group` rather than by two `(change)` bindings.
+   *
+   * The value arrives as whatever `[nzValue]` held, which the template pins to
+   * the contract's literals. It is re-typed to `Disclosure` here rather than
+   * cast blindly, so a value that is neither contract member is ignored instead
+   * of being written into a form that will submit it - the failure this
+   * component exists to prevent, reached by a new route.
+   */
+  protected choose(choice: unknown): void {
+    if (choice !== 'SHARE_DETAILS' && choice !== 'CONCEALED') {
+      return;
+    }
     this._disclosure.set(choice);
     this.onTouched();
 

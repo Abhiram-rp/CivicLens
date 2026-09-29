@@ -9,6 +9,20 @@ import { roleGuard, ADMIN_ROLES, STAFF_ROLES } from './core/auth/role.guard';
  * cheap phone over a slow connection, and the officer and admin bundles are the
  * largest code in the app while being the least used.
  *
+ * The table is grouped by shell: each group names a layout component and its
+ * `children` are the screens that render inside it. That grouping is the whole
+ * point of a shell - a screen that is not a child of one renders with no
+ * navigation, no `<main>` landmark and no skip link, which is a usable-looking
+ * page that a keyboard or screen-reader user cannot get out of.
+ *
+ * It is worth being explicit that this was a real bug rather than a
+ * specification that was never met. The five shells existed, and `app.spec.ts`
+ * asserted their skip link, landmark labels and single-`h1` invariants in
+ * isolation - and none of them was referenced by a single route. All 27
+ * screens rendered bare. The suite was green and the application was
+ * unreachable, because "the shell is correct" was never the same claim as "the
+ * shell is used". `shell-wiring.spec.ts` now asserts the second thing.
+ *
  * Two rules govern the paths themselves:
  *
  * 1. **A tracking token is never in a path.** SPEC 14 requires it, so
@@ -25,206 +39,277 @@ import { roleGuard, ADMIN_ROLES, STAFF_ROLES } from './core/auth/role.guard';
  *
  * Guards are UX, not security (SPEC 3): they save a signed-in citizen from a
  * page that would fail every request. The server decides authorization.
+ *
+ * They sit on the children rather than on the group, deliberately. A guard on
+ * `/officer` would send an officer who mistypes `/officer/asigned` to
+ * "not authorised" instead of "no such page" - true, but the wrong answer to the
+ * question actually asked, and it would make every typo in the staff area look
+ * like an authorization failure.
  */
 export const routes: Routes = [
+  // --- Staff groups, declared first ---------------------------------------
+  //
+  // Order is load-bearing and the reason is the catch-all below. A `**` child
+  // matches every remaining path, so the group that owns it has to be the last
+  // entry in the table. With the citizen group declared first - which is where it
+  // was, being the entry point - its `**` swallowed `/manager/queue` and rendered
+  // "page not found" in the citizen frame: a department manager following a link
+  // from an email landed on a 404. Angular matches in declaration order, so the
+  // prefixed groups are declared first and the pathless group, which is the one
+  // carrying the wildcard, is declared last.
+  //
+  // This is why "put the catch-all at the end" is a rule about the *table*, not
+  // about the route: a wildcard nested in a pathless parent competes with every
+  // sibling of that parent.
   {
-    path: '',
-    title: 'CivicLens - report an issue in your area',
-    loadComponent: () =>
-      import('./features/home/home-page').then((m) => m.HomePage),
-  },
-
-  // --- Citizen ------------------------------------------------------------
-  {
-    path: 'report',
-    title: 'Report an issue - CivicLens',
-    loadComponent: () =>
-      import('./features/issues/report-issue-page').then((m) => m.ReportIssuePage),
-  },
-  {
-    path: 'tracked',
-    title: 'Track a report - CivicLens',
-    loadComponent: () =>
-      import('./features/tracked/tracked-list-page').then((m) => m.TrackedListPage),
-  },
-  {
-    path: 'tracked/:issueId',
-    title: 'Your report - CivicLens',
-    loadComponent: () =>
-      import('./features/tracked/tracked-detail-page').then((m) => m.TrackedDetailPage),
-  },
-  {
-    path: 'public',
-    title: 'Public reports - CivicLens',
-    loadComponent: () =>
-      import('./features/issues/public-issue-page').then((m) => m.PublicIssuePage),
-  },
-  {
-    path: 'public/:publicCode',
-    title: 'Public report - CivicLens',
-    loadComponent: () =>
-      import('./features/issues/public-issue-detail-page').then(
-        (m) => m.PublicIssueDetailPage,
-      ),
-  },
-
-  // --- Contact: the approval gate ----------------------------------------
-  {
-    path: 'contact/verify',
-    title: 'Confirm your report - CivicLens',
-    loadComponent: () =>
-      import('./features/contact/contact-verify-page').then((m) => m.ContactVerifyPage),
-  },
-  {
-    path: 'contact/decision',
-    title: 'Approve sharing your details - CivicLens',
-    loadComponent: () =>
-      import('./features/contact/contact-decision-page').then(
-        (m) => m.ContactDecisionPage,
-      ),
-  },
-
-  // --- Session ------------------------------------------------------------
-  {
-    path: 'sign-in',
-    title: 'Sign in - CivicLens',
-    loadComponent: () => import('./features/auth/sign-in-page').then((m) => m.SignInPage),
-  },
-  {
-    path: 'my-reports',
-    title: 'My reports - CivicLens',
-    canActivate: [roleGuard()],
-    loadComponent: () =>
-      import('./features/issues/my-reports-page').then((m) => m.MyReportsPage),
-  },
-  {
-    path: 'notifications',
-    title: 'Notifications - CivicLens',
-    canActivate: [roleGuard()],
-    loadComponent: () =>
-      import('./features/notifications/notifications-page').then(
-        (m) => m.NotificationsPage,
-      ),
-  },
-
-  // --- Officer ------------------------------------------------------------
-  {
-    path: 'officer/assigned',
-    title: 'Assigned to me - CivicLens',
-    canActivate: [roleGuard(...STAFF_ROLES)],
-    loadComponent: () =>
-      import('./features/officer/assigned-page').then((m) => m.AssignedPage),
-  },
-  {
-    path: 'officer/resolve/:issueId',
-    title: 'Resolve issue - CivicLens',
-    canActivate: [roleGuard(...STAFF_ROLES)],
-    loadComponent: () =>
-      import('./features/officer/resolve-page').then((m) => m.ResolvePage),
+    path: 'officer',
+    loadComponent: () => import('./layouts/officer-shell').then((m) => m.OfficerShell),
+    children: [
+      {
+        path: 'assigned',
+        title: 'Assigned to me - CivicLens',
+        canActivate: [roleGuard(...STAFF_ROLES)],
+        loadComponent: () =>
+          import('./features/officer/assigned-page').then((m) => m.AssignedPage),
+      },
+      {
+        path: 'resolve/:issueId',
+        title: 'Resolve issue - CivicLens',
+        canActivate: [roleGuard(...STAFF_ROLES)],
+        loadComponent: () =>
+          import('./features/officer/resolve-page').then((m) => m.ResolvePage),
+      },
+      {
+        path: '**',
+        title: 'Page not found - CivicLens',
+        loadComponent: () =>
+          import('./features/errors/not-found-page').then((m) => m.NotFoundPage),
+      },
+    ],
   },
 
   // --- Manager ------------------------------------------------------------
   {
-    path: 'manager/queue',
-    title: 'Department queue - CivicLens',
-    canActivate: [roleGuard(...STAFF_ROLES)],
-    loadComponent: () => import('./features/manager/queue-page').then((m) => m.QueuePage),
-  },
-  {
-    path: 'manager/awaiting-confirmation',
-    title: 'Awaiting confirmation - CivicLens',
-    canActivate: [roleGuard(...STAFF_ROLES)],
-    loadComponent: () =>
-      import('./features/manager/awaiting-confirmation-page').then(
-        (m) => m.AwaitingConfirmationPage,
-      ),
-  },
-  {
-    path: 'manager/duplicates',
-    title: 'Duplicate review - CivicLens',
-    canActivate: [roleGuard(...STAFF_ROLES)],
-    loadComponent: () =>
-      import('./features/manager/duplicate-review-page').then(
-        (m) => m.DuplicateReviewPage,
-      ),
-  },
-  {
-    path: 'manager/analytics',
-    title: 'Analytics - CivicLens',
-    canActivate: [roleGuard(...STAFF_ROLES)],
-    loadComponent: () =>
-      import('./features/manager/analytics-page').then((m) => m.AnalyticsPage),
-  },
-  {
-    path: 'manager/categories',
-    title: 'Category proposals - CivicLens',
-    canActivate: [roleGuard(...STAFF_ROLES)],
-    loadComponent: () =>
-      import('./features/manager/category-proposals-page').then(
-        (m) => m.CategoryProposalsPage,
-      ),
-  },
-  {
-    path: 'manager/assignment',
-    title: 'Assignment - CivicLens',
-    canActivate: [roleGuard(...STAFF_ROLES)],
-    loadComponent: () =>
-      import('./features/manager/assignment-page').then((m) => m.AssignmentPage),
-  },
-  {
-    path: 'manager/sla-monitor',
-    title: 'SLA monitor - CivicLens',
-    canActivate: [roleGuard(...STAFF_ROLES)],
-    loadComponent: () =>
-      import('./features/manager/sla-monitor-page').then((m) => m.SlaMonitorPage),
+    path: 'manager',
+    loadComponent: () => import('./layouts/manager-shell').then((m) => m.ManagerShell),
+    children: [
+      {
+        path: 'queue',
+        title: 'Department queue - CivicLens',
+        canActivate: [roleGuard(...STAFF_ROLES)],
+        loadComponent: () =>
+          import('./features/manager/queue-page').then((m) => m.QueuePage),
+      },
+      {
+        path: 'awaiting-confirmation',
+        title: 'Awaiting confirmation - CivicLens',
+        canActivate: [roleGuard(...STAFF_ROLES)],
+        loadComponent: () =>
+          import('./features/manager/awaiting-confirmation-page').then(
+            (m) => m.AwaitingConfirmationPage,
+          ),
+      },
+      {
+        path: 'duplicates',
+        title: 'Duplicate review - CivicLens',
+        canActivate: [roleGuard(...STAFF_ROLES)],
+        loadComponent: () =>
+          import('./features/manager/duplicate-review-page').then(
+            (m) => m.DuplicateReviewPage,
+          ),
+      },
+      {
+        path: 'analytics',
+        title: 'Analytics - CivicLens',
+        canActivate: [roleGuard(...STAFF_ROLES)],
+        loadComponent: () =>
+          import('./features/manager/analytics-page').then((m) => m.AnalyticsPage),
+      },
+      {
+        path: 'categories',
+        title: 'Category proposals - CivicLens',
+        canActivate: [roleGuard(...STAFF_ROLES)],
+        loadComponent: () =>
+          import('./features/manager/category-proposals-page').then(
+            (m) => m.CategoryProposalsPage,
+          ),
+      },
+      {
+        path: 'assignment',
+        title: 'Assignment - CivicLens',
+        canActivate: [roleGuard(...STAFF_ROLES)],
+        loadComponent: () =>
+          import('./features/manager/assignment-page').then((m) => m.AssignmentPage),
+      },
+      {
+        path: 'sla-monitor',
+        title: 'SLA monitor - CivicLens',
+        canActivate: [roleGuard(...STAFF_ROLES)],
+        loadComponent: () =>
+          import('./features/manager/sla-monitor-page').then((m) => m.SlaMonitorPage),
+      },
+      {
+        path: '**',
+        title: 'Page not found - CivicLens',
+        loadComponent: () =>
+          import('./features/errors/not-found-page').then((m) => m.NotFoundPage),
+      },
+    ],
   },
 
   // --- Admin --------------------------------------------------------------
   {
-    path: 'admin/users',
-    title: 'Users - CivicLens',
-    canActivate: [roleGuard(...ADMIN_ROLES)],
-    loadComponent: () => import('./features/admin/users-page').then((m) => m.UsersPage),
-  },
-  {
-    path: 'admin/departments',
-    title: 'Departments - CivicLens',
-    canActivate: [roleGuard(...ADMIN_ROLES)],
-    loadComponent: () =>
-      import('./features/admin/departments-page').then((m) => m.DepartmentsPage),
-  },
-  {
-    path: 'admin/categories',
-    title: 'Categories - CivicLens',
-    canActivate: [roleGuard(...ADMIN_ROLES)],
-    loadComponent: () =>
-      import('./features/admin/categories-page').then((m) => m.CategoriesPage),
-  },
-  {
-    path: 'admin/sla',
-    title: 'SLA policies - CivicLens',
-    canActivate: [roleGuard(...ADMIN_ROLES)],
-    loadComponent: () => import('./features/admin/sla-page').then((m) => m.SlaPage),
-  },
-  {
-    path: 'admin/audit-logs',
-    title: 'Audit log - CivicLens',
-    canActivate: [roleGuard(...ADMIN_ROLES)],
-    loadComponent: () =>
-      import('./features/admin/audit-logs-page').then((m) => m.AuditLogsPage),
+    path: 'admin',
+    loadComponent: () => import('./layouts/admin-shell').then((m) => m.AdminShell),
+    children: [
+      {
+        path: 'users',
+        title: 'Users - CivicLens',
+        canActivate: [roleGuard(...ADMIN_ROLES)],
+        loadComponent: () => import('./features/admin/users-page').then((m) => m.UsersPage),
+      },
+      {
+        path: 'departments',
+        title: 'Departments - CivicLens',
+        canActivate: [roleGuard(...ADMIN_ROLES)],
+        loadComponent: () =>
+          import('./features/admin/departments-page').then((m) => m.DepartmentsPage),
+      },
+      {
+        path: 'categories',
+        title: 'Categories - CivicLens',
+        canActivate: [roleGuard(...ADMIN_ROLES)],
+        loadComponent: () =>
+          import('./features/admin/categories-page').then((m) => m.CategoriesPage),
+      },
+      {
+        path: 'sla',
+        title: 'SLA policies - CivicLens',
+        canActivate: [roleGuard(...ADMIN_ROLES)],
+        loadComponent: () =>
+          import('./features/admin/sla-page').then((m) => m.SlaPage),
+      },
+      {
+        path: 'audit-logs',
+        title: 'Audit log - CivicLens',
+        canActivate: [roleGuard(...ADMIN_ROLES)],
+        loadComponent: () =>
+          import('./features/admin/audit-logs-page').then((m) => m.AuditLogsPage),
+      },
+      {
+        path: '**',
+        title: 'Page not found - CivicLens',
+        loadComponent: () =>
+          import('./features/errors/not-found-page').then((m) => m.NotFoundPage),
+      },
+    ],
   },
 
-  // --- Terminal states ----------------------------------------------------
+  // --- Citizen, path-less and last -----------------------------------------
   {
-    path: 'not-authorised',
-    title: 'Not authorised - CivicLens',
-    loadComponent: () =>
-      import('./features/errors/not-authorised-page').then((m) => m.NotAuthorisedPage),
-  },
-  {
-    path: '**',
-    title: 'Page not found - CivicLens',
-    loadComponent: () =>
-      import('./features/errors/not-found-page').then((m) => m.NotFoundPage),
+    // Path-less, so the citizen URLs stay exactly what the contract and the
+    // emailed links already use: `/report`, not `/citizen/report`. The citizen
+    // group also absorbs sign-in, notifications, the contact gate and both error
+    // pages, because a signed-out visitor arriving from an email or a mistyped
+    // URL still needs the same nav to get somewhere else.
+    path: '',
+    loadComponent: () => import('./layouts/citizen-shell').then((m) => m.CitizenShell),
+    children: [
+      {
+        path: '',
+        title: 'CivicLens - report an issue in your area',
+        loadComponent: () =>
+          import('./features/home/home-page').then((m) => m.HomePage),
+      },
+      {
+        path: 'report',
+        title: 'Report an issue - CivicLens',
+        loadComponent: () =>
+          import('./features/issues/report-issue-page').then((m) => m.ReportIssuePage),
+      },
+      {
+        path: 'tracked',
+        title: 'Track a report - CivicLens',
+        loadComponent: () =>
+          import('./features/tracked/tracked-list-page').then((m) => m.TrackedListPage),
+      },
+      {
+        path: 'tracked/:issueId',
+        title: 'Your report - CivicLens',
+        loadComponent: () =>
+          import('./features/tracked/tracked-detail-page').then((m) => m.TrackedDetailPage),
+      },
+      {
+        path: 'public',
+        title: 'Public reports - CivicLens',
+        loadComponent: () =>
+          import('./features/issues/public-issue-page').then((m) => m.PublicIssuePage),
+      },
+      {
+        path: 'public/:publicCode',
+        title: 'Public report - CivicLens',
+        loadComponent: () =>
+          import('./features/issues/public-issue-detail-page').then(
+            (m) => m.PublicIssueDetailPage,
+          ),
+      },
+
+      // --- Contact: the approval gate ------------------------------------
+      {
+        path: 'contact/verify',
+        title: 'Confirm your report - CivicLens',
+        loadComponent: () =>
+          import('./features/contact/contact-verify-page').then((m) => m.ContactVerifyPage),
+      },
+      {
+        path: 'contact/decision',
+        title: 'Approve sharing your details - CivicLens',
+        loadComponent: () =>
+          import('./features/contact/contact-decision-page').then(
+            (m) => m.ContactDecisionPage,
+          ),
+      },
+
+      // --- Session --------------------------------------------------------
+      {
+        path: 'sign-in',
+        title: 'Sign in - CivicLens',
+        loadComponent: () =>
+          import('./features/auth/sign-in-page').then((m) => m.SignInPage),
+      },
+      {
+        path: 'my-reports',
+        title: 'My reports - CivicLens',
+        canActivate: [roleGuard()],
+        loadComponent: () =>
+          import('./features/issues/my-reports-page').then((m) => m.MyReportsPage),
+      },
+      {
+        path: 'notifications',
+        title: 'Notifications - CivicLens',
+        canActivate: [roleGuard()],
+        loadComponent: () =>
+          import('./features/notifications/notifications-page').then(
+            (m) => m.NotificationsPage,
+          ),
+      },
+
+      // --- Terminal states ------------------------------------------------
+      {
+        path: 'not-authorised',
+        title: 'Not authorised - CivicLens',
+        loadComponent: () =>
+          import('./features/errors/not-authorised-page').then((m) => m.NotAuthorisedPage),
+      },
+      {
+        // The table's catch-all, and the reason this group is declared last: a
+        // `**` here matches every path no earlier group claimed, so a mistyped
+        // URL is a 404 *inside the nav* rather than a bare page with no way out.
+        path: '**',
+        title: 'Page not found - CivicLens',
+        loadComponent: () =>
+          import('./features/errors/not-found-page').then((m) => m.NotFoundPage),
+      },
+    ],
   },
 ];

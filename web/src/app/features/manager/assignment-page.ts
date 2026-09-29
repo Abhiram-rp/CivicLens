@@ -1,5 +1,4 @@
 import { Component } from '@angular/core';
-import { ManagerShell } from '../../layouts/manager-shell';
 import { NotYet } from '../../shared/not-yet';
 
 /**
@@ -13,11 +12,9 @@ import { NotYet } from '../../shared/not-yet';
  */
 @Component({
   selector: 'app-assignment-page',
-  imports: [ManagerShell, NotYet],
+  imports: [NotYet],
   template: `
-    <app-manager-shell>
-      <app-not-yet [phase]="'P1'" [operations]="operations" />
-    </app-manager-shell>
+    <app-not-yet [phase]="'P1'" [operations]="operations" />
   `,
 })
 export class AssignmentPage {

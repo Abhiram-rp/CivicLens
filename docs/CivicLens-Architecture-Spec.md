@@ -386,7 +386,7 @@ Redis is **not** used as a system of record for anything — pure cache-aside wi
 ## Section N — Deployment Architecture
 
 - **Dev:** `docker-compose.yml` with Postgres+pgvector, Redis, RabbitMQ, backend, frontend — one command up.
-- **CI (GitHub Actions):** on PR — backend build+test, frontend build+test, lint; on merge to main — build Docker images, push to registry.
+- **CI (GitHub Actions):** on PR — contract lint + gitleaks secret scan, then backend build+test and frontend `npm run verify` (contract check → `ng test --watch=false` → production build → 250 kB gzip budget gate); on merge to main — build Docker images, push to registry.
 - **Production target:** a single cloud VM or small managed-container service (e.g. Render/Fly.io/AWS ECS) running the Docker images, managed Postgres (with pgvector extension enabled), managed Redis, managed RabbitMQ (or CloudAMQP free tier) — deliberately avoiding Kubernetes at this scale.
 - **Secrets:** all via environment variables injected at deploy time (DB creds, JWT secret, AI API key, Redis/RabbitMQ URLs) — never committed, `.env` gitignored, `.env.example` committed.
 
@@ -396,7 +396,7 @@ Redis is **not** used as a system of record for anything — pure cache-aside wi
 
 | Day | Objective | Deliverable | DoD |
 |---|---|---|---|
-| 1 | Project scaffolding | Spring Boot + Angular skeletons, Docker Compose, CI skeleton | `docker compose up` runs both apps |
+| 1 | Project scaffolding | Spring Boot + Angular 22 skeletons, NG-ZORRO theme with the AA token set, Docker Compose, CI skeleton | `docker compose up` runs both apps |
 | 2 | User/Auth domain | User entity, register/login, JWT issuing | Login returns valid JWT; unit tests pass |
 | 3 | Spring Security + RBAC | SecurityFilterChain, role annotations, Angular guards/interceptor | Protected endpoint returns 401/403 correctly |
 | 4 | Department/Category domain | Entities + admin CRUD endpoints | Admin can CRUD departments/categories |
@@ -536,7 +536,7 @@ AI image analysis, AI summarization at resolution, analytics dashboards, refresh
 Constrained NL-analytics, email notifications, WebSocket/SSE live updates, image-based duplicate similarity, Prometheus/Grafana, horizontal scaling of the AI consumer, extraction of the AI module into a standalone service if load justifies it.
 
 ### Final technology stack
-Angular + TypeScript + Angular Material + RxJS/Signals · Java + Spring Boot + Spring Security + Spring Data JPA + Bean Validation · PostgreSQL + pgvector · RabbitMQ · Redis · LLM provider behind an abstraction port · Docker + Docker Compose · GitHub Actions · OpenAPI/Swagger.
+Angular + TypeScript + NG-ZORRO (ng-zorro-antd) + RxJS/Signals · Java + Spring Boot + Spring Security + Spring Data JPA + Bean Validation · PostgreSQL + pgvector · RabbitMQ · Redis · LLM provider behind an abstraction port · Docker + Docker Compose · GitHub Actions · OpenAPI/Swagger.
 
 ### Final architecture (one diagram)
 ```mermaid

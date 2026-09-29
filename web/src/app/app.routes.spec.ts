@@ -16,6 +16,31 @@ import { routes } from './app.routes';
 
 const routesSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'app.routes.ts'), 'utf8');
 
+/**
+ * Every route in the table, flattened to a group + child pair.
+ *
+ * The table is nested one level: a shell group and the screens inside it. These
+ * tests were written against a flat table and reached into `route.path` looking
+ * for `'contact/verify'` or `'officer/assigned'`. Nesting moved those strings
+ * into `child.path`, so every filter here now runs over the flattened view.
+ * Restructuring the table is exactly the kind of change that makes assertions
+ * quietly vacuous, and a filter matching nothing passes `toBeGreaterThan(0)`
+ * only because the line below it would then have nothing to iterate.
+ */
+function flatRoutes(): Array<{ path: string; canActivate: unknown; title: unknown }> {
+  return routes.flatMap((route) => {
+    const group = route.path ?? '';
+    return [
+      { path: group, canActivate: route.canActivate, title: route.title },
+      ...(route.children ?? []).map((child) => ({
+        path: group ? `${group}/${child.path}` : (child.path ?? ''),
+        canActivate: child.canActivate,
+        title: child.title,
+      })),
+    ];
+  });
+}
+
 describe('route table', () => {
   it('lazily loads every route component', () => {
     const eager = /^\s*component:\s*[^,]+/m.exec(routesSource);
@@ -26,9 +51,14 @@ describe('route table', () => {
   it('gives every route a title', () => {
     // A route with no title leaves the browser tab reading "Angular" or the bare
     // path, which for a civic service is indistinguishable from a broken site.
-    const titled = (routesSource.match(/^\s*title:\s*'/gm) ?? []).length;
-    // The wildcard route plus one per feature route.
-    expect(titled).toBe(routes.length);
+    // Checked against the object, not the source text: counting `title:` lines
+    // in the file passes even when the count is wrong for the reason that
+    // matters - a title attached to the wrong route.
+    const untitled = flatRoutes().filter((route) => !route.title);
+    // The four shell groups carry no title of their own; they are frames, and
+    // every screen inside them is titled. The citizen group is the empty path,
+    // so it is listed as ''.
+    expect(untitled.map((r) => r.path).sort()).toEqual(['', 'admin', 'manager', 'officer']);
   });
 
   it('never puts a tracking token in a path', () => {
@@ -36,8 +66,8 @@ describe('route table', () => {
     // route, query string or `Referer`, so a shared link to /tracked/... must be
     // impossible to construct from the address bar. The tracked routes carry
     // only an issue id.
-    const trackedRoutes = routes.filter((route) => route.path?.startsWith('tracked'));
-    expect(trackedRoutes.length).toBeGreaterThan(0);
+    const trackedRoutes = flatRoutes().filter((route) => route.path.startsWith('tracked'));
+    expect(trackedRoutes.map((r) => r.path)).toEqual(['tracked', 'tracked/:issueId']);
 
     for (const route of trackedRoutes) {
       expect(route.path, 'a tracked route must not carry a token parameter').not.toMatch(
@@ -53,8 +83,14 @@ describe('route table', () => {
     // different device from the one holding the tracking token, so a guard here
     // would break the flow exactly when it is most needed. The single-use token
     // in the link is the credential, and it grants no report content.
-    const contactRoutes = routes.filter((route) => route.path?.startsWith('contact'));
-    expect(contactRoutes.length).toBeGreaterThan(0);
+    const contactRoutes = flatRoutes().filter((route) => route.path.startsWith('contact'));
+    // Spelled out rather than counted: a filter that matches nothing and a filter
+    // that matches two routes both satisfy "greater than zero", and only the first
+    // is the bug this is here to prevent.
+    expect(contactRoutes.map((r) => r.path)).toEqual([
+      'contact/verify',
+      'contact/decision',
+    ]);
 
     for (const route of contactRoutes) {
       expect(route.canActivate, `${route.path} must not be guarded`).toBeUndefined();
@@ -65,21 +101,56 @@ describe('route table', () => {
     // The inverse check on the contact exception: a staff surface with no guard
     // renders and then fails every request, which reads to a signed-in officer
     // as CivicLens being broken.
-    const staffRoutes = routes.filter(
+    const staffRoutes = flatRoutes().filter(
       (route) =>
-        /^(officer|manager|admin)\//.test(route.path ?? '') ||
-        route.path?.startsWith('notifications'),
+        (/^(officer|manager|admin)\//.test(route.path) &&
+          !route.path.endsWith('/**')) ||
+        route.path.startsWith('notifications'),
     );
-    expect(staffRoutes.length).toBeGreaterThan(0);
+    // The `**` children are filtered out above: they are the not-found page and
+    // are deliberately unguarded so a mistyped staff URL says "no such page"
+    // rather than sending an officer to sign in. The three bare group paths
+    // (`officer`, `manager`, `admin`) are frames with no screen of their own.
+    // Declaration order is asserted here because it is load-bearing: the
+    // pathless citizen group carries the table catch-all and must be last, so
+    // the staff groups precede it. Sorted, because the *set* is the property that
+    // matters here and the order is asserted in `shell-wiring.spec.ts`.
+    expect([...staffRoutes.map((r) => r.path)].sort()).toEqual([
+      'admin/audit-logs',
+      'admin/categories',
+      'admin/departments',
+      'admin/sla',
+      'admin/users',
+      'manager/analytics',
+      'manager/assignment',
+      'manager/awaiting-confirmation',
+      'manager/categories',
+      'manager/duplicates',
+      'manager/queue',
+      'manager/sla-monitor',
+      'notifications',
+      'officer/assigned',
+      'officer/resolve/:issueId',
+    ]);
 
     for (const route of staffRoutes) {
       expect(route.canActivate, `${route.path} has no guard`).toBeDefined();
     }
   });
 
-  it('ends with a wildcard so an unknown path is a real page', () => {
+  it('gives every shell group a wildcard, so no unknown path is a dead end', () => {
     // Without this an unmatched URL renders a blank outlet, which is the worst
-    // possible answer on a site people are told to bookmark.
-    expect(routes.at(-1)?.path).toBe('**');
+    // possible answer on a site people are told to bookmark. Per group rather
+    // than one table-level `**`, so the 404 is rendered inside a shell and keeps
+    // its navigation. `shell-wiring.spec.ts` asserts the same property from the
+    // other direction - that a wildcard renders a real page - because either one
+    // alone can be satisfied by a table that is merely well-formed.
+    for (const route of routes) {
+      if (!route.children?.length) continue;
+      expect(
+        route.children.some((child) => child.path === '**'),
+        `/${route.path} has no wildcard child`,
+      ).toBe(true);
+    }
   });
 });
