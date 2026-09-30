@@ -915,18 +915,14 @@ export class Reference {
      *
      */
     public static listReferenceCategories<ThrowOnError extends boolean = false>(options?: Options<ListReferenceCategoriesData, ThrowOnError>): RequestResult<ListReferenceCategoriesResponses, ListReferenceCategoriesErrors, ThrowOnError> {
-        return (options?.client ?? client).get<ListReferenceCategoriesResponses, ListReferenceCategoriesErrors, ThrowOnError>({
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/reference/categories',
-            ...options
-        });
+        return (options?.client ?? client).get<ListReferenceCategoriesResponses, ListReferenceCategoriesErrors, ThrowOnError>({ url: '/reference/categories', ...options });
     }
     
     /**
      * List departments
      *
      * Which department handles what is public information, so this is open to
-     * any authenticated caller. It is not a user list: names, contact details
+     * anyone, signed in or not. It is not a user list: names, contact details
      * and staff counts of a department are not exposed here.
      *
      * Only `active: true` departments are returned. A department is
@@ -935,11 +931,7 @@ export class Reference {
      *
      */
     public static listReferenceDepartments<ThrowOnError extends boolean = false>(options?: Options<ListReferenceDepartmentsData, ThrowOnError>): RequestResult<ListReferenceDepartmentsResponses, ListReferenceDepartmentsErrors, ThrowOnError> {
-        return (options?.client ?? client).get<ListReferenceDepartmentsResponses, ListReferenceDepartmentsErrors, ThrowOnError>({
-            security: [{ scheme: 'bearer', type: 'http' }],
-            url: '/reference/departments',
-            ...options
-        });
+        return (options?.client ?? client).get<ListReferenceDepartmentsResponses, ListReferenceDepartmentsErrors, ThrowOnError>({ url: '/reference/departments', ...options });
     }
 }
 

@@ -288,10 +288,17 @@ export type IssueCreateResponse = {
     issue: IssueDetail;
     /**
      * True only for a concealed submission, and the reason the client must
-     * not navigate to a status page that will never resolve. The report is
-     * `PENDING_VERIFICATION` and out of every queue until the reporter
-     * proves they own the address, so the 201 response has to say so at
-     * the moment the reporter is still on the page to act on it.
+     * not navigate to a status page that will never resolve. The report's
+     * `contactState` is `PENDING_VERIFICATION` and it is held out of every
+     * queue until the reporter proves they own the address, so the 201
+     * response has to say so at the moment the reporter is still on the
+     * page to act on it.
+     *
+     * Note this is a contact *state*, not an `IssueStatus`: the report's
+     * own status is `SUBMITTED` and it never appears in an officer's
+     * queue. `PENDING_VERIFICATION` is not a member of the `IssueStatus`
+     * enum, and reading it as one produces a status screen that can never
+     * resolve - the very outcome this flag exists to prevent.
      *
      */
     contactVerificationRequired?: boolean;

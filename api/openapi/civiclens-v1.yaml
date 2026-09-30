@@ -1580,7 +1580,14 @@ paths:
         deadlines — a category minted from raw citizen text would arrive with
         neither.
       operationId: listReferenceCategories
-      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      # Public, and deliberately so. This populates the report form, and
+      # `POST /issues` is public so that a signed-out reporter can use it -
+      # SPEC 3.1 makes the concealed reporter with no account the primary user
+      # of that form. A role requirement here would leave the form unusable for
+      # exactly the person it exists for, while the mock (which serves this
+      # unauthenticated) would hide the failure until production.
+      x-required-roles: []
+      security: []
       responses:
         '200':
           description: Active categories
@@ -1597,14 +1604,17 @@ paths:
       summary: List departments
       description: |
         Which department handles what is public information, so this is open to
-        any authenticated caller. It is not a user list: names, contact details
+        anyone, signed in or not. It is not a user list: names, contact details
         and staff counts of a department are not exposed here.
 
         Only `active: true` departments are returned. A department is
         deactivated rather than deleted, and deactivation is refused outright
         while it still has open issues — see `PUT /admin/departments/{id}`.
       operationId: listReferenceDepartments
-      x-required-roles: [CITIZEN, FIELD_OFFICER, DEPARTMENT_MANAGER, ADMIN]
+      # Public for the same reason as `/reference/categories`: it populates the
+      # report form, which a signed-out reporter has to be able to complete.
+      x-required-roles: []
+      security: []
       responses:
         '200':
           description: Active departments
@@ -2591,10 +2601,17 @@ components:
           type: boolean
           description: |
             True only for a concealed submission, and the reason the client must
-            not navigate to a status page that will never resolve. The report is
-            `PENDING_VERIFICATION` and out of every queue until the reporter
-            proves they own the address, so the 201 response has to say so at
-            the moment the reporter is still on the page to act on it.
+            not navigate to a status page that will never resolve. The report's
+            `contactState` is `PENDING_VERIFICATION` and it is held out of every
+            queue until the reporter proves they own the address, so the 201
+            response has to say so at the moment the reporter is still on the
+            page to act on it.
+
+            Note this is a contact *state*, not an `IssueStatus`: the report's
+            own status is `SUBMITTED` and it never appears in an officer's
+            queue. `PENDING_VERIFICATION` is not a member of the `IssueStatus`
+            enum, and reading it as one produces a status screen that can never
+            resolve - the very outcome this flag exists to prevent.
         trackingToken:
           type: [string, 'null']
           description: |

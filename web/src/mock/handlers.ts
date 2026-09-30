@@ -1,5 +1,10 @@
 import { http, HttpResponse } from 'msw';
-import type { ErrorEnvelope } from '../app/api/generated/types.gen';
+import type {
+  ErrorEnvelope,
+  IssueCreateForm,
+  IssueCreateResponse,
+  ReporterContact,
+} from '../app/api/generated/types.gen';
 import {
   ACCOUNTS,
   CATEGORIES,
@@ -9,9 +14,21 @@ import {
   NOTIFICATIONS,
   PUBLIC_ISSUE,
   TRACKED_ISSUE,
-  issuePage,
-  notificationPage,
-} from './fixtures';
+    createdIssue,
+    issuePage,
+    notificationPage,
+    registerTrackedReport,
+    trackedDetailFor,
+    trackedSummariesFor,
+  } from './fixtures';
+  import {
+    deriveTrackingToken,
+    fingerprintIssueCreate,
+    idempotencyStore,
+    isValidIdempotencyKey,
+    recordIdempotencyMismatch,
+    reporterIdentity,
+  } from './idempotency';
 
 /**
  * Development mock server.
@@ -37,7 +54,82 @@ import {
 
 const API = '*/api/v1';
 
+/**
+ * Origin used to build the `publicShareUrl` in the create-issue response.
+ *
+ * The contract calls it an absolute URL, and a relative one would be useless to
+ * a reporter who copies it into a message to a neighbour. Overridable so a
+ * browser-driven test can assert against the origin it is actually served from
+ * rather than string-matching a host.
+ */
+const PUBLIC_ORIGIN = 'https://civiclens.example.org';
+
 let traceCounter = 0;
+
+/** A form field's value, narrowed away from the `File` case. */
+const text = (value: FormDataEntryValue | null): string | undefined => {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+  return value === '' ? undefined : value;
+};
+
+/**
+ * The `POST /issues` request body, decoded from multipart.
+ *
+ * Typed as the contract's `IssueCreateForm` so this cannot drift from it, which
+ * is the whole reason the handler does not build its own object literal. It
+ * returns a *partial*: a body the client got wrong is not an error this parser
+ * should raise, because the 400 that comes back has to be the contract's error
+ * envelope with per-field details, and that is decided below.
+ *
+ * `latitude` and `longitude` are the two fields the contract types as `number`
+ * and multipart delivers as text. `Number(...)` on an empty string yields `0`,
+ * which is a real coordinate in the Gulf of Guinea, so the empty case is checked
+ * explicitly and reported as absent rather than silently becoming null island.
+ */
+const parseIssueCreateForm = (form: FormData): Partial<IssueCreateForm> => {
+  const contactType = text(form.get('reporterContact.type'));
+  const contactValue = text(form.get('reporterContact.value'));
+  // `ContactChannelType` is the single-member union `'EMAIL'`, so the value from
+  // the form is narrowed against it rather than cast. An unrecognised channel is
+  // dropped here, which surfaces to the client as the contract's
+  // "contact channel required" 400 rather than as a mock-only complaint - the
+  // real server has exactly one channel type, so agreeing with that is what makes
+  // the mock a useful rehearsal.
+  const reporterContact: ReporterContact | undefined =
+    contactType === 'EMAIL' && contactValue ? { type: 'EMAIL', value: contactValue } : undefined;
+
+  const coordinate = (name: 'latitude' | 'longitude'): number | undefined => {
+    const raw = text(form.get(name));
+    if (raw === undefined) {
+      return undefined;
+    }
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+
+  const note = text(form.get('contactDisclosureNote'));
+
+  return {
+    title: text(form.get('title')),
+    description: text(form.get('description')),
+    disclosure: text(form.get('disclosure')) as IssueCreateForm['disclosure'],
+    reporterContact,
+    // Narrowed to the contract's `'1'` literal rather than passed through, so a
+    // client that sent the string `'yes'` does not satisfy a check the contract
+    // describes as a constant marker.
+    contactDisclosureNote: note === '1' ? '1' : undefined,
+    categoryId: text(form.get('categoryId')),
+    subcategoryId: text(form.get('subcategoryId')),
+    proposedCategoryText: text(form.get('proposedCategoryText')),
+    latitude: coordinate('latitude'),
+    longitude: coordinate('longitude'),
+    address: text(form.get('address')),
+    // `photos` is a repeated field, so `get` would only ever see the first one.
+    photos: form.getAll('photos').filter((entry): entry is File => entry instanceof File),
+  };
+};
 
 function envelope(
   status: number,
@@ -68,13 +160,117 @@ const forbidden = (path: string, message = 'You do not have access to this resou
 const notFound = (path: string, message = 'Not found.'): HttpResponse<ErrorEnvelope> =>
   HttpResponse.json(envelope(404, 'NOT_FOUND', message, path), { status: 404 });
 
-/** Pull the role out of a mock bearer: `mock-token-<role>`. */
-function roleFromToken(request: Request): string | null {
-  const auth = request.headers.get('Authorization');
-  if (!auth?.startsWith('Bearer mock-token-')) {
-    return null;
+  /** Pull the role out of a mock bearer: `mock-token-<role>`. */
+  function roleFromToken(request: Request): string | null {
+    const auth = request.headers.get('Authorization');
+    if (!auth?.startsWith('Bearer mock-token-')) {
+      return null;
+    }
+    return auth.slice('Bearer mock-token-'.length);
   }
-  return auth.slice('Bearer mock-token-'.length);
+
+  /**
+   * The reporter identity behind a mock bearer, or `null` when there is no session.
+   *
+   * Two things are worth being explicit about here.
+   *
+   * First, this is deliberately not `roleFromToken`. Idempotency is scoped to a
+   * *reporter*, and "which citizen is this" is not answerable with a role: two
+   * signed-in citizens share `CITIZEN`, so scoping a replay on the role would let
+   * one citizen's retry return another citizen's report - a cross-tenant read
+   * created by a cache. So the role is reverse-mapped to the account that holds
+   * it.
+   *
+   * Second, that reverse mapping is a limitation of the *mock*, not of the
+   * contract. The mock issues `mock-token-<role>` from `POST /auth/login`, so its
+   * bearer simply does not carry a user id, and there happens to be exactly one
+   * account per role for the lookup to resolve. The contract says the real
+   * identity is the user id, and a real backend that issued a role-only bearer
+   * would make this whole rule unenforceable - two citizens would share one
+   * identity and could read each other's replays. So the mock gets away with it and
+   * a real one must not; if this ever needs to model two citizens at once, the
+   * login response has to start carrying an id.
+   */
+  function signedInUserIdFrom(request: Request): string | null {
+    const role = roleFromToken(request);
+    if (role === null) {
+      return null;
+    }
+    return Object.keys(ACCOUNTS).find((key) => ACCOUNTS[key]!.role === role) ?? null;
+  }
+
+/**
+ * The `minLength` / `maxLength` / range constraints `IssueCreateForm` declares.
+ *
+ * Copied from the contract by hand rather than derived from it, which is a
+ * duplication the generated types cannot express - `minLength` survives into the
+ * OpenAPI document and into the Zod-free type only as prose. That is exactly why
+ * this table is worth having: without it the mock accepts a three-character title
+ * that the real server rejects with a 400, so a reporter loses a carefully typed
+ * report at the moment of submitting it, having been told it worked.
+ *
+ * Declared once, next to the parser that produces the values, and asserted in
+ * `handlers.spec.ts` by a test that reads these numbers rather than restating
+ * them - so a contract change that moves a bound is a failing test rather than a
+ * silent divergence.
+ */
+export const ISSUE_LIMITS = {
+  title: { minLength: 5, maxLength: 200 },
+  description: { minLength: 10, maxLength: 5000 },
+  proposedCategoryText: { minLength: 3, maxLength: 100 },
+  address: { maxLength: 300 },
+  latitude: { min: -90, max: 90 },
+  longitude: { min: -180, max: 180 },
+  photos: { maxItems: 3 },
+} as const;
+
+/** Length violations, as contract `FieldError`s. Absent fields are not length errors. */
+function lengthErrors(body: Partial<IssueCreateForm>): NonNullable<ErrorEnvelope['details']> {
+  const errors: NonNullable<ErrorEnvelope['details']> = [];
+
+  for (const field of ['title', 'description', 'proposedCategoryText', 'address'] as const) {
+    const value = body[field];
+    if (typeof value !== 'string') {
+      continue;
+    }
+    const limits = ISSUE_LIMITS[field];
+    // `address` carries only a `maxLength`, so `minLength` is read through an `in`
+    // check rather than destructured - a form field that is optional has no lower
+    // bound, and that absence is meaningful rather than a missing default.
+    const minLength = 'minLength' in limits ? limits.minLength : undefined;
+    const { maxLength } = limits;
+    if (minLength !== undefined && value.length < minLength) {
+      errors.push({ field, issue: `Must be at least ${minLength} characters.` });
+    }
+    if (value.length > maxLength) {
+      errors.push({ field, issue: `Must be at most ${maxLength} characters.` });
+    }
+  }
+
+  return errors;
+}
+
+/** Coordinate ranges. Out of range is a real coordinate error, not a null island. */
+function rangeErrors(body: Partial<IssueCreateForm>): NonNullable<ErrorEnvelope['details']> {
+  const errors: NonNullable<ErrorEnvelope['details']> = [];
+
+  for (const field of ['latitude', 'longitude'] as const) {
+    const value = body[field];
+    if (typeof value !== 'number') {
+      continue;
+    }
+    const { min, max } = ISSUE_LIMITS[field];
+    if (value < min || value > max) {
+      errors.push({ field, issue: `Must be between ${min} and ${max}.` });
+    }
+  }
+
+  const photos = body.photos?.length ?? 0;
+  if (photos > ISSUE_LIMITS.photos.maxItems) {
+    errors.push({ field: 'photos', issue: `At most ${ISSUE_LIMITS.photos.maxItems} photos.` });
+  }
+
+  return errors;
 }
 
 /** The `/auth/**` rule: a bearer is a defect here, so it fails loudly. */
@@ -161,13 +357,89 @@ export const handlers = [
 
   http.post(`${API}/issues`, async ({ request }) => {
     const path = new URL(request.url).pathname;
-    const body = (await request.json()) as {
-      title?: string;
-      description?: string;
-      disclosure?: string;
-      reporterContact?: { type: string; value: string };
-      contactDisclosureNote?: string;
-    };
+
+    // `Idempotency-Key` is `required: true` in the contract and typed `format:
+    // uuid`, so the generated client will not let a form omit it. The mock used
+    // to ignore it beyond checking presence, which meant the one guarantee that
+    // cannot be checked any other way went unexercised: the key has to be the
+    // *same* on a retry for the server to replay the original 201 - including the
+    // original tracking token - instead of creating a second report. A form that
+    // minted a fresh key per attempt would pass every test here and duplicate a
+    // citizen's report in production, which is precisely what the header exists to
+    // prevent.
+    const idempotencyKey = request.headers.get('Idempotency-Key');
+    if (!idempotencyKey) {
+      return HttpResponse.json(
+        envelope(
+          400,
+          'VALIDATION_ERROR',
+          'The Idempotency-Key header is required.',
+          path,
+          [{ field: 'Idempotency-Key', issue: 'Required header, a client-generated UUID.' }],
+        ),
+        { status: 400 },
+      );
+    }
+
+    // Presence is not the same as being a UUID. A counter, a timestamp or an
+    // all-zero placeholder is what a client sends when it has not understood the
+    // header, and every one of those collides in production while looking fine in
+    // a mock that only checks for a non-empty string.
+    if (!isValidIdempotencyKey(idempotencyKey)) {
+      return HttpResponse.json(
+        envelope(
+          400,
+          'VALIDATION_ERROR',
+          'The Idempotency-Key header must be a UUID.',
+          path,
+          [
+            {
+              field: 'Idempotency-Key',
+              issue: 'Must be a client-generated UUID, at most 100 characters.',
+            },
+          ],
+        ),
+        { status: 400 },
+      );
+    }
+
+    const signedInUserId = signedInUserIdFrom(request);
+    const identity = reporterIdentity(request, signedInUserId);
+
+    // The contract declares this endpoint `multipart/form-data`, because a report
+    // carries up to three photos, and the generated client therefore sends
+    // `FormData`. This used to call `request.json()`, which throws on a multipart
+    // body - so the mock rejected the one request it was supposed to model, and
+    // the create-issue path had never actually been exercised against it.
+    //
+    // Every field arrives as a string, including the two numbers the contract
+    // types as `number`. `formData` below is the single place that conversion
+    // happens, so there is one parser to audit rather than one per handler.
+    const form = await request.formData();
+    const body = parseIssueCreateForm(form);
+
+    // The replay check sits *after* parsing, because deciding whether a payload
+    // is "materially different" needs the parsed body - and it sits *before*
+    // validation, because a retry of a submission that already succeeded must not
+    // be re-validated into a 400. The reporter already has their report; failing
+    // their retry would be a way worse outcome than the duplicate the header
+    // prevents.
+    //
+    // Only successful submissions are recorded, so a 400 above is never cached: a
+    // citizen who fixed a validation error and retried with the same key gets a
+    // fresh evaluation, not a replayed rejection.
+    const fingerprint = fingerprintIssueCreate(body);
+    const previous = idempotencyStore.lookup(identity, idempotencyKey);
+    if (previous) {
+      if (previous.fingerprint !== fingerprint) {
+        // Contract rule 4, and deliberately not a 409. The original report is
+        // returned unchanged and nothing is created, so a client bug surfaces in
+        // the log instead of as a citizen discovering that the report they
+        // believed they filed never existed.
+        recordIdempotencyMismatch(identity, idempotencyKey);
+      }
+      return HttpResponse.json(previous.response, { status: 201 });
+    }
 
     // SPEC 3.2, enforced here as well as in the UI: `disclosure` is required with
     // no default, and a concealed report needs a contact channel and the
@@ -196,19 +468,127 @@ export const handlers = [
       }
     }
 
+    // The contract types these four as present-and-typed rather than optional, so
+    // a body missing any of them is one the real server rejects. Modelling that
+    // here is what stops the mock from teaching a form to submit a report the
+    // backend will refuse. `latitude`/`longitude` are the ones that matter most:
+    // a client that dropped them on the floor would look fine against a mock
+    // that only checks the disclosure rules.
+    const invalid: ErrorEnvelope['details'] = [
+      body.title ? null : { field: 'title', issue: 'Must not be blank.' },
+      body.description ? null : { field: 'description', issue: 'Must not be blank.' },
+      typeof body.latitude === 'number' ? null : { field: 'latitude', issue: 'Required.' },
+      typeof body.longitude === 'number' ? null : { field: 'longitude', issue: 'Required.' },
+    ].filter((entry): entry is { field: string; issue: string } => entry !== null);
+
+    // `proposedCategoryText` is the citizen's own wording for a problem the
+    // taxonomy does not cover. Required against the `OTHER` category and rejected
+    // against any other, because it is stored as a proposal that a manager maps
+    // onto the taxonomy at triage - a proposal attached to a category that already
+    // fits is a duplicate waiting to happen.
+    const isOtherCategory = CATEGORIES.find((c) => c.id === body.categoryId)?.code === 'OTHER';
+    if (isOtherCategory && !body.proposedCategoryText) {
+      invalid.push({
+        field: 'proposedCategoryText',
+        issue: 'Required when the category is OTHER.',
+      });
+    }
+    if (!isOtherCategory && body.proposedCategoryText) {
+      invalid.push({
+        field: 'proposedCategoryText',
+        issue: 'Rejected unless the category is OTHER.',
+      });
+    }
+
+    if (invalid.length > 0) {
+      return HttpResponse.json(
+        envelope(400, 'VALIDATION_ERROR', 'The report is missing required fields.', path, invalid),
+        { status: 400 },
+      );
+    }
+
+    // The field-level constraints above decide only *whether* a field is present.
+    // These decide whether its value is acceptable, and they are checked after
+    // presence so that a missing field produces one error rather than two - a
+    // reporter fixing a form wants "this is missing", not "this is missing and
+    // also too short".
+    const unacceptable = [...lengthErrors(body), ...rangeErrors(body)];
+    if (unacceptable.length > 0) {
+      return HttpResponse.json(
+        envelope(400, 'VALIDATION_ERROR', 'One or more fields are not valid.', path, unacceptable),
+        { status: 400 },
+      );
+    }
+
+    // A contact channel on a shared report is the mirror of the rule above, and
+    // it matters for the same reason: the address has to end up *not stored*, and
+    // the only reliable way to achieve that is to refuse to accept it.
+    if (body.disclosure === 'SHARE_DETAILS' && (body.reporterContact || body.contactDisclosureNote)) {
+      return HttpResponse.json(
+        envelope(400, 'VALIDATION_ERROR', 'A shared report must not carry a contact channel.', path, [
+          {
+            field: body.reporterContact ? 'reporterContact' : 'contactDisclosureNote',
+            issue: 'Rejected when disclosure is SHARE_DETAILS.',
+          },
+        ]),
+        { status: 400 },
+      );
+    }
+
+    const category = CATEGORIES.find((c) => c.id === body.categoryId);
+    const issue = createdIssue({
+      // The four fields above are the ones validated as present, so these
+      // narrowings are the assertion that they are: if one stops being checked,
+      // this stops compiling rather than sending `undefined` to a `string`.
+      title: body.title!,
+      description: body.description!,
+      disclosure: body.disclosure,
+      categoryName: category?.name ?? null,
+      proposedCategoryText: body.proposedCategoryText ?? null,
+      latitude: body.latitude!,
+      longitude: body.longitude!,
+      address: body.address ?? null,
+    });
+
     // SPEC 7.1: the contact address is never echoed back, to anyone. A mock that
     // returned it would let a UI get comfortable displaying it.
-    return HttpResponse.json(
-      {
-        id: 'iss-mock-new',
-        publicCode: 'CL-2026-0003',
-        status: 'SUBMITTED',
-        statusLabel: 'Received',
-        disclosure: body.disclosure,
-        createdAt: '2026-03-02T09:15:00.000Z',
-      },
-      { status: 201 },
-    );
+    //
+    // The two conditional fields are the reason this handler is worth reading.
+    // `trackingToken` is returned exactly once in the life of a concealed report
+    // and is unrecoverable afterwards, so the client has to persist it before it
+    // navigates anywhere - and this mock is where a UI would be judged to handle
+    // that. `contactVerificationRequired` is what stops it navigating to a status
+    // page that cannot resolve, because a concealed report sits unverified and
+    // out of every queue until the reporter proves they own the address.
+    //
+    // The contract is explicit that the token is "present only for a concealed
+    // submission. Absent (null) for a signed-in citizen, whose access comes from
+    // their session instead." A signed-in reporter therefore gets `null` even
+    // when they choose CONCEALED - their concealment is enforced by the fact that
+    // staff cannot see their identity, not by withholding their own account. This
+    // is the one place a *signed-in* request changes the response, and it is
+    // invisible in dev unless the request is checked, so it is checked here.
+    const signedIn = signedInUserIdFrom(request) !== null;
+    const trackingToken = body.disclosure === 'CONCEALED' && !signedIn ? deriveTrackingToken(identity) : null;
+    if (trackingToken) {
+      // The token has to open something, or the mock models a system where filing
+      // a concealed report as a citizen costs you access to it.
+      registerTrackedReport(trackingToken, issue);
+    }
+
+    const response: IssueCreateResponse = {
+      issue,
+      contactVerificationRequired: body.disclosure === 'CONCEALED',
+      trackingToken,
+      publicShareUrl: `${PUBLIC_ORIGIN}/public/${issue.publicCode}`,
+    };
+
+    // Recorded only now, once every rule above has passed, so the cache holds
+    // successful submissions and nothing else. `identity` is part of the key
+    // because "the same reporter" is what the contract scopes a replay to.
+    idempotencyStore.remember(identity, idempotencyKey, fingerprint, response);
+
+    return HttpResponse.json(response, { status: 201 });
   }),
 
   http.get(`${API}/issues`, ({ request }) => {
@@ -254,10 +634,14 @@ export const handlers = [
       return forbidden(path, '/tracked/** is authenticated by the tracking token, not a session.');
     }
     const token = request.headers.get('X-Tracking-Token');
-    if (token !== MOCK_TRACKING_TOKEN) {
+    const reports = token ? trackedSummariesFor(token) : null;
+    if (!reports) {
       return forbidden(path, 'A valid tracking token is required.');
     }
-    return HttpResponse.json(issuePage([ISSUES[1]!]));
+    // A list, because one token is a device and a device accumulates reports. This
+    // endpoint returned a single hard-coded report for a single hard-coded token,
+    // which meant a token handed out by `POST /issues` reached nothing.
+    return HttpResponse.json(issuePage(reports));
   }),
 
   http.get(`${API}/tracked/issues/:issueId`, ({ request, params }) => {
@@ -265,13 +649,19 @@ export const handlers = [
     if (rejectUnexpectedBearer(request)) {
       return forbidden(path, '/tracked/** is authenticated by the tracking token, not a session.');
     }
-    if (request.headers.get('X-Tracking-Token') !== MOCK_TRACKING_TOKEN) {
-      return forbidden(path, 'A valid tracking token is required.');
+    const token = request.headers.get('X-Tracking-Token');
+    const requestedId = params['issueId'];
+    const issueId = typeof requestedId === 'string' ? requestedId : undefined;
+    const issue = token && issueId ? trackedDetailFor(token, issueId) : undefined;
+    if (!issue) {
+      // A token the mock never issued and an id that is not under it are both
+      // "not found" rather than "forbidden", so this endpoint does not confirm
+      // that an id exists to a caller holding the wrong token.
+      return token && trackedSummariesFor(token)
+        ? notFound(path)
+        : forbidden(path, 'A valid tracking token is required.');
     }
-    if (TRACKED_ISSUE.id !== params['issueId']) {
-      return notFound(path);
-    }
-    return HttpResponse.json(TRACKED_ISSUE);
+    return HttpResponse.json(issue);
   }),
 
   // --- public and reference (no credential) ----------------------------------------------------

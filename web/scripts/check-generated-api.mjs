@@ -209,7 +209,155 @@ try {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Report
+// 5. Authorisation drift: `x-required-roles` and `security` must tell the same
+//    story, and a status code must actually be inside `responses`.
+//
+//    SPEC.md 7.2a calls this "the `x-required-roles` drift assertion" and leans
+//    on it being meaningful. It did not exist, which is how the following
+//    shipped: `GET /reference/categories` declared
+//    `x-required-roles: [CITIZEN, ...]` and no `security: []`, so it required a
+//    session - while `POST /issues` is public precisely so a reporter with no
+//    account can file a report. The report form was therefore unusable by the
+//    concealed reporter the product is written for, and the mock served the
+//    endpoint unauthenticated, so it worked in development and would have 401'd
+//    in production. Nothing in the test suite or in this script noticed.
+//
+//    Two independent failure shapes, so they are checked separately:
+//
+//      a. roles/security disagreement. A non-empty role list with no
+//         `security: []` means "authenticated and role-checked"; an empty list
+//         with `security: []` means "open to anyone". One saying the first and
+//         the generated client saying the other is the bug above.
+//
+//      b. an orphaned status code. YAML indentation is the only thing separating
+//         a response from a stray property, and a block indented two spaces too
+//         far silently demotes `'401':` from a documented response to an extra
+//         key on the operation object - so the error disappears from the
+//         generated client with no error anywhere. That happened to both
+//         `/reference/*` operations.
+//
+//    Text-based like the rest of this file: no YAML dependency, no network.
+// ---------------------------------------------------------------------------
+
+// (a) roles vs security, per operation, using the operation's own indent so a
+// nested block cannot be misattributed to its parent.
+{
+  const lines = contract.split('\n');
+  const indentOf = (line) => line.length - line.trimStart().length;
+
+  const opSecurity = new Map(); // operationId -> true if it declares security: []
+  const opRoles = new Map(); // operationId -> true if it declares a non-empty role list
+
+  let currentOp = null;
+  let currentOpIndent = 0;
+
+  for (const line of lines) {
+    const op = /^(\s*)operationId:\s*(\S+)\s*$/.exec(line);
+    if (op) {
+      currentOp = op[2];
+      currentOpIndent = indentOf(op[1]);
+      continue;
+    }
+    if (currentOp === null || currentOpIndent === 0) continue;
+    // A line less indented than the operation's own keys belongs to the path or
+    // the method, not to this operation.
+    if (/^\s*\S/.test(line) && indentOf(line) < currentOpIndent) {
+      currentOp = null;
+      continue;
+    }
+    if (/^\s*security:\s*\[\]\s*$/.test(line)) {
+      opSecurity.set(currentOp, true);
+    }
+    // `.*` not `.+`: an empty `x-required-roles: []` is the case that most needs
+    // checking, and `.+` requires at least one character inside the brackets so
+    // it silently failed to match - the operation then fell out of both maps and
+    // the check reported "all agree" while examining 55 of 56 operations.
+    const roles = /^\s*x-required-roles:\s*\[(.*)\]\s*$/.exec(line);
+    if (roles) {
+      opRoles.set(currentOp, roles[1].trim().length > 0);
+    }
+  }
+
+  const disagreements = [];
+  // Iterate the *union* of both maps, not just the public ones. An earlier
+  // version looped over `opSecurity` alone, which meant an operation that
+  // required a role and simply omitted `security: []` - precisely the bug this
+  // check was added for - was never examined at all and the check reported "all
+  // agree". Found by reintroducing the original bug and watching it pass.
+  const allOps = new Set([...opSecurity.keys(), ...opRoles.keys()]);
+  for (const op of allOps) {
+    const isPublic = opSecurity.get(op) === true;
+    const needsRole = opRoles.get(op) === true;
+    const declaresRoles = opRoles.has(op);
+    if (isPublic && needsRole) {
+      disagreements.push(`${op}: declares security: [] but also requires a role`);
+    }
+    if (!isPublic && declaresRoles && !needsRole) {
+      disagreements.push(`${op}: requires no role but does not declare security: []`);
+    }
+  }
+  for (const d of disagreements) {
+    problems.push(`authorisation drift - ${d}`);
+  }
+  note(
+    `authorisation: ${allOps.size} operations checked for roles/security agreement` +
+      (disagreements.length ? '' : ' (all agree)'),
+  );
+}
+
+// (b) status codes must be a direct child of `responses:`.
+//
+// Two malformation shapes, and an earlier version of this check caught only the
+// first, so it reported "all status codes nested correctly" while the response
+// was in fact unreachable. Both were found by mutating the contract and watching
+// the check pass, which is the only way to tell a guard that works from one that
+// merely runs:
+//
+//   - same indent as `responses:`: a stray key on the *operation* object. This
+//     is the original bug - YAML indentation is the only thing separating a
+//     documented response from a property, and the error silently vanishes from
+//     the generated client.
+//   - deeper than one level: the status code has been nested inside another
+//     status code's body, e.g. `'401'` under `'200'`'s `content:`. Also silent.
+{
+  const lines = contract.split('\n');
+  const indentOf = (line) => line.length - line.trimStart().length;
+  const orphans = [];
+  let responsesIndent = null;
+  let where = '';
+
+  for (const line of lines) {
+    if (/^paths:\s*$/.test(line)) continue;
+    const op = /^\s*operationId:\s*(\S+)\s*$/.exec(line);
+    if (op) {
+      where = op[1];
+      responsesIndent = null;
+    }
+    const res = /^(\s*)responses:\s*$/.exec(line);
+    if (res) {
+      responsesIndent = indentOf(res[1]);
+      continue;
+    }
+    const code = /^(\s*)'(\d{3}|[45]XX)':/.exec(line);
+    if (code && responsesIndent !== null) {
+      const at = indentOf(code[1]);
+      if (at === responsesIndent) {
+        orphans.push(`${where}: '${code[2]}' sits beside responses:, not inside it`);
+      } else if (at > responsesIndent + 2) {
+        orphans.push(
+          `${where}: '${code[2]}' is nested ${at - responsesIndent - 2} level(s) too deep inside responses:`,
+        );
+      }
+    }
+  }
+  for (const o of orphans) {
+    problems.push(`orphaned response - ${o}`);
+  }
+  note(`response blocks: ${orphans.length ? `${orphans.length} malformed` : 'all status codes correctly nested'}`);
+}
+
+// ---------------------------------------------------------------------------
+// 6. Report
 console.log('');
 if (problems.length) {
   console.error(`  ${problems.length} problem(s):`);

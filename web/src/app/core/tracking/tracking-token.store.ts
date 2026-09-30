@@ -13,6 +13,17 @@ import { Injectable, signal } from '@angular/core';
  *
  * Invariants this class exists to hold:
  *
+ *  0. **One token, many reports.** A single token is a property of the *device*,
+ *     not of a report. `GET /tracked/issues` is "every report created with this
+ *     token"; the contract is explicit that a reporter on a shared kiosk or a
+ *     family phone "accumulates several reports under one token, so this is a
+ *     list and not a single resource". Filing a second concealed report
+ *     therefore re-saves the *same* token and the single slot below is the whole
+ *     design, not a simplification. The one lossy case is being handed a
+ *     genuinely *different* token while one is already held, which would strand
+ *     the earlier reports - the contract's model says the server does not do
+ *     that, and nothing here may grow a second slot to paper over it if it ever
+ *     does, because two tokens means two reports the citizen can no longer reach.
  *  1. The token is never placed in a route, query string, fragment or
  *     `Referer`. Copying the address bar must not produce a working link, so
  *     there is no code path here that accepts a token from a URL. Reading one
@@ -41,7 +52,16 @@ export class TrackingTokenStore {
     this.token.set(this.read());
   }
 
-  /** Persist a token, replacing any previous one. */
+  /**
+   * Persist a token.
+   *
+   * Replaces whatever was held, which is safe *because of invariant 0*: a second
+   * concealed report re-presents the same device token, so there is nothing to
+   * lose. The genuinely destructive case is a different token arriving while one
+   * is already held, which would strand the earlier reports - and silently
+   * swapping is the worst possible response to that, because the citizen would
+   * find out weeks later that a report they filed had become unreachable.
+   */
   save(token: string): void {
     this.token.set(token);
     this.write(token);
@@ -62,6 +82,10 @@ export class TrackingTokenStore {
 
   /**
    * Forget every concealed report held on this device.
+   *
+   * Not an alias of `forget` by accident: one token grants access to every
+   * concealed report filed from this browser (invariant 0), so dropping it drops
+   * access to all of them. The reports themselves are untouched server-side.
    *
    * Note this leaves `/tracked/**` reachable-but-empty: the surface can no
    * longer read any report, because the token is gone. Concealment does not

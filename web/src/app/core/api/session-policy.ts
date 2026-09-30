@@ -41,8 +41,20 @@ import { apiPath } from './api-base-url';
  *   credential is the single-use token in the link and nothing else.
  * - `/public/**` - public by definition; a session must not be able to change
  *   what an anonymous visitor sees.
+ * - `/reference/**` - the public taxonomy and department list that populate the
+ *   report form. These are public in the contract, and the form has to be
+ *   completable by a signed-out reporter: `POST /issues` is public for the same
+ *   reason, so gating the categories behind a session would leave the report
+ *   form unusable for the concealed reporter it exists for, while still looking
+ *   fine in development because the mock serves this tree unauthenticated.
  */
-export const SESSION_EXEMPT_PATHS: readonly string[] = ['/auth', '/tracked', '/contact', '/public'];
+export const SESSION_EXEMPT_PATHS: readonly string[] = [
+  '/auth',
+  '/tracked',
+  '/contact',
+  '/public',
+  '/reference',
+];
 
 /**
  * The one path family deliberately absent from `SESSION_EXEMPT_PATHS`: `/issues`.

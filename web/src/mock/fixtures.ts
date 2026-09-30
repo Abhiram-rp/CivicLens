@@ -1,6 +1,8 @@
 import type {
   Category,
   CurrentUser,
+  Disclosure,
+  IssueDetail,
   IssueSummary,
   IssueSummaryPage,
   Notification,
@@ -287,3 +289,168 @@ export const MOCK_PASSWORD = 'mock-password-do-not-use';
 
 /** The tracking token the mock server will accept on `/tracked/**`. */
 export const MOCK_TRACKING_TOKEN = 'civiclens-mock-tracking-token-do-not-use';
+
+/**
+ * A walk of `publicCode` for reports created through `POST /issues`.
+ *
+ * `public_code` is documented as a dense walkable range and is what a share link
+ * is built from, so two reports must never share one. The builder used to return
+ * the same `id` and `publicCode` for every call, which made a duplicate invisible:
+ * a client that filed the same report twice got back two responses with the same
+ * share URL, and nothing anywhere could tell the difference. That is the same
+ * class of bug as the idempotency cache being absent, one layer down.
+ *
+ * Starts past the seeded fixtures so a created report cannot collide with one the
+ * mock ships with.
+ */
+let createdReportSequence = 2;
+
+function nextCreatedReportIds(): { id: string; publicCode: string } {
+  createdReportSequence += 1;
+  const n = String(createdReportSequence).padStart(4, '0');
+  return { id: `iss-mock-new-${n}`, publicCode: `CL-2026-${n}` };
+}
+
+/** Reset the created-report walk, so each test starts from the same state. */
+export function resetCreatedReportSequence(): void {
+  createdReportSequence = 2;
+}
+
+/**
+ * Which reports a tracking token can reach.
+ *
+ * The `/tracked/**` endpoints used to accept exactly one hard-coded token and
+ * serve one hard-coded report, so a report created through `POST /issues` returned
+ * a token that led nowhere. That was survivable while the returned token was also
+ * the fixture's constant; it stops being survivable the moment tokens are derived
+ * per reporter, which is what makes a replay return the token the reporter already
+ * has. So the token a create hands out has to actually open something, or the mock
+ * would be modelling a system where filing a report as a citizen costs you access
+ * to it.
+ *
+ * Keyed by token and holding a *list* per token, because that is the contract's
+ * model: one token per device, many reports underneath it.
+ */
+const trackedReports = new Map<string, { summaries: IssueSummary[]; details: TrackedIssueDetail[] }>();
+
+function seedTrackedReports(): void {
+  // The seeded report, reachable by the documented fixture token, so the existing
+  // `/tracked/**` behaviour and its tests are unchanged.
+  trackedReports.set(MOCK_TRACKING_TOKEN, {
+    summaries: [ISSUES[1]!],
+    details: [TRACKED_ISSUE],
+  });
+}
+seedTrackedReports();
+
+/**
+ * Make a just-created concealed report reachable by its token.
+ *
+ * Projected into the two shapes `/tracked/**` serves rather than stored as an
+ * `IssueDetail`, because those are different projections of one report and the
+ * endpoints have different contracts - the list is a summary, the detail is not.
+ */
+export function registerTrackedReport(token: string, issue: IssueDetail): void {
+  const existing = trackedReports.get(token) ?? { summaries: [], details: [] };
+  trackedReports.set(token, {
+    summaries: [
+      ...existing.summaries,
+      { id: issue.id, publicCode: issue.publicCode, title: issue.title, status: issue.status, createdAt: issue.createdAt },
+    ],
+    details: [
+      ...existing.details,
+      { publicCode: issue.publicCode, title: issue.title, status: issue.status, createdAt: issue.createdAt },
+    ],
+  });
+}
+
+/** `null` for a token the mock has never issued, so callers can refuse it. */
+export function trackedSummariesFor(token: string): IssueSummary[] | null {
+  return trackedReports.get(token)?.summaries ?? null;
+}
+
+export function trackedDetailFor(token: string, issueId: string): TrackedIssueDetail | undefined {
+  const reports = trackedReports.get(token);
+  if (!reports) {
+    return undefined;
+  }
+  const match = reports.summaries.find((summary) => summary.id === issueId);
+  return match ? reports.details.find((detail) => detail.publicCode === match.publicCode) : undefined;
+}
+
+/** Back to just the seeded fixture report, for test isolation. */
+export function resetTrackedReports(): void {
+  trackedReports.clear();
+  seedTrackedReports();
+}
+
+/**
+ * The `IssueDetail` handed back by `POST /issues`.
+ *
+ * A builder rather than a constant, because the response has to agree with what
+ * the reporter just submitted. A fixed fixture would have to be one of the two
+ * things that is always true of a just-created issue - shared or concealed - and
+ * whichever it was not, the other path would be handed an issue describing
+ * something else. The concealed case is the one that matters most: the client's
+ * whole post-submit behaviour keys off `contactState` and the
+ * `contactVerificationRequired` flag, so a mock that returned a shared-shaped
+ * issue for a concealed report would let the UI route to a status page that can
+ * never resolve.
+ *
+ * Built from the submitted values, so the echo-back is real rather than
+ * decorative. The address is deliberately *not* echoed: SPEC 7.1 says the contact
+ * channel is never returned to anyone, and a mock that returned it would let a UI
+ * grow comfortable displaying one.
+ *
+ * There is no `photoCount` parameter. `IssueDetail` has no such field, even though
+ * `IssueSummary`, `TrackedIssueDetail` and `PublicIssue` all do - the create
+ * response simply does not report it. An earlier version of this builder accepted
+ * a `photoCount` and dropped it, which read as though the value were being
+ * returned and quietly lost. The limit is still enforced on the way in
+ * (`ISSUE_LIMITS`), and the count is still part of the idempotency fingerprint,
+ * so attaching or removing a photo still counts as a different submission; but
+ * nothing claims the server tells the reporter how many photos arrived.
+ */
+export function createdIssue(details: {
+  title: string;
+  description: string;
+  disclosure: Disclosure;
+  categoryName?: string | null;
+  proposedCategoryText?: string | null;
+  latitude: number;
+  longitude: number;
+  address?: string | null;
+}): IssueDetail {
+  const concealed = details.disclosure === 'CONCEALED';
+  const { id, publicCode } = nextCreatedReportIds();
+
+  return {
+    id,
+    publicCode,
+    title: details.title,
+    description: details.description,
+    // A concealed report is not yet out of any queue: the reporter has not
+    // proved they own the address, so it sits in a contact *state* rather than
+    // advancing into triage. Note `PENDING_VERIFICATION` is a `ContactState`, not
+    // an `IssueStatus` - the report's own status is SUBMITTED and it never enters
+    // an officer's queue. Conflating the two produces a status screen that can
+    // never resolve, which is what `contactVerificationRequired` exists to stop.
+    // The label says "Received" in both cases, because that is the only thing
+    // true of a report nobody has looked at yet - and a reporter reading
+    // "Under review" for a report no officer has seen is a promise the platform
+    // cannot keep.
+    status: 'SUBMITTED',
+    statusLabel: 'Received',
+    disclosure: details.disclosure,
+    contactState: concealed ? 'PENDING_VERIFICATION' : undefined,
+    categoryName: details.categoryName ?? null,
+    proposedCategoryText: details.proposedCategoryText ?? null,
+    latitude: details.latitude,
+    longitude: details.longitude,
+    address: details.address ?? null,
+    reporterId: null,
+    reporterDisplayName: null,
+    confirmationCount: 0,
+    createdAt: at(0),
+  };
+}

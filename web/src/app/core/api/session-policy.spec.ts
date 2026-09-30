@@ -167,8 +167,52 @@ describe('session bearer policy vs the contract', () => {
     }
   });
 
-  it('keeps session surfaces out of the exempt list', () => {
-    // The negative direction matters as much as the positive: an over-broad
+  it('keeps the report form reachable by a reporter with no session', () => {
+    // The regression this whole block exists to prevent. `POST /issues` is
+    // public so a signed-out reporter can file a report, and the categories that
+    // populate the same form are public too. They were briefly not: the contract
+    // required a CITIZEN role on `/reference/categories`, which left the report
+    // form unusable by the concealed reporter SPEC 3.1 is written for - and the
+    // mock served the same endpoint unauthenticated, so the form worked in
+    // development and would have 401'd in production.
+    //
+    // Asserted against the contract rather than as a literal, so the guarantee is
+    // re-established if either side changes.
+    const referenceOps = ops.filter((op) => op.path.startsWith('/reference/'));
+    expect(referenceOps.length).toBeGreaterThan(0);
+    for (const op of referenceOps) {
+      expect(isSessionExempt(url(op.path)), `${op.operationId} must not require a session`).toBe(
+        true,
+      );
+    }
+  });
+
+  it('only exempts prefixes the contract actually marks unauthenticated', () => {
+    // The inverse of the check above, and the one that was missing. Without it an
+    // over-broad prefix could be added to `SESSION_EXEMPT_PATHS` and no test would
+    // object, because the forward check only asks about operations the contract
+    // already marks public - it never asks whether an exempt prefix corresponds
+    // to anything. The failure mode is a signed-in user being silently turned
+    // anonymous on a surface that needed the bearer, which surfaces as a logout
+    // with no error.
+    const publicPrefixes = new Set(
+      ops.map((op) => `/${op.path.replace(/^\//, '').split('/')[0]}`),
+    );
+    // `/issues` is public for `createIssue` but credential-bearing for the rest of
+    // its tree, so it is deliberately not exempt and must be tolerated here.
+    const unexemptableButPartlyPublic = new Set(['/issues']);
+
+    const unjustified = SESSION_EXEMPT_PATHS.filter(
+      (prefix) => !publicPrefixes.has(prefix) && !unexemptableButPartlyPublic.has(prefix),
+    );
+
+    expect(
+      unjustified,
+      'these prefixes are exempt from the bearer but the contract marks nothing under them public',
+    ).toEqual([]);
+  });
+
+  it('keeps session surfaces out of the exempt list', () => {    // The negative direction matters as much as the positive: an over-broad
     // prefix silently breaks the citizen and staff areas, and the symptom is a
     // signed-in user mysteriously logged out.
     expect(isSessionExempt(url('/issues'))).toBe(false);

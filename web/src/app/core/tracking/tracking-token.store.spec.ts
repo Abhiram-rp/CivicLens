@@ -58,11 +58,22 @@ describe('TrackingTokenStore', () => {
     expect(rehydrated.current()).toBe('tok_from_previous_session');
   });
 
-  it('replaces a previous token rather than accumulating them', () => {
-    store.save('first');
-    store.save('second');
+  it('keeps one token however many reports are filed under it', () => {
+    // The contract's model, and the reason this is not a bug. `listTrackedIssues`
+    // is "every report created with this token... A citizen who reports from a
+    // shared kiosk or a family phone accumulates several reports under one token,
+    // so this is a list and not a single resource." One token per device, many
+    // reports underneath it.
+    //
+    // So filing a second concealed report re-saves the *same* token, and replacing
+    // the stored value loses nothing. A previous version of this test described
+    // replacing as the goal in its own right, which is the reasoning that would
+    // have quietly capped a citizen at one concealed report had the server ever
+    // issued a per-report token instead.
+    store.save('trk_same');
+    store.save('trk_same');
 
-    expect(store.current()).toBe('second');
+    expect(store.current()).toBe('trk_same');
     expect(Object.keys(saved)).toHaveLength(1);
   });
 
@@ -74,7 +85,11 @@ describe('TrackingTokenStore', () => {
     expect(saved['civiclens.trackingToken.v1']).toBeUndefined();
   });
 
-  it('forgetAll behaves the same, because only one report is tracked at a time in P1', () => {
+  it('forgetAll drops access to every report on this device', () => {
+    // Not an alias of `forget` by accident. One token grants access to every
+    // concealed report filed from this browser, so forgetting it *is* forgetting
+    // all of them - the reports themselves are untouched server-side, which is
+    // what the "cannot revoke" note on `forget` is about.
     store.save('tok_abc123');
     store.forgetAll();
 
