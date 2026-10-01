@@ -209,6 +209,119 @@ try {
 }
 
 // ---------------------------------------------------------------------------
+// 4. Mock coverage: every operation in the contract has exactly one MSW handler.
+//
+//    Checks 1 and 2 establish that the *generated client* covers the contract. This
+//    one establishes that the *mock server* does, which is a different claim and was
+//    quietly false. The audit behind this: of 56 operations, 41 had no handler. Two
+//    of the missing ones - `/status` and `/transition` - were written as factories
+//    that nothing called, so they compiled, and no check noticed.
+//
+//    A mock that is silently missing an endpoint is worse than no mock, because it
+//    returns a 404/405 from MSW's unhandled-request path that looks exactly like a
+//    real backend routing bug. Every gap costs a debugging session to find and
+//    nothing to detect.
+//
+//    Three failure shapes, because they are different mistakes:
+//
+//      a. uncovered - the contract declares it, no handler claims it.
+//      b. duplicated - two handlers claim the same method+path. MSW resolves to
+//         whichever registered first, with no warning; the second is dead code that
+//         reads as if it works. This shipped: two copies of `POST /issues`.
+//      c. orphaned - a handler claims a path the contract does not declare, so the
+//         mock and the client have drifted apart.
+// ---------------------------------------------------------------------------
+{
+  // (a) + (c) reference data: the contract's method+path pairs, taken from the path
+  // keys themselves so the check cannot be satisfied by a comment or a type name.
+  const lines = contract.split('\n');
+  const indentOf = (line) => line.length - line.trimStart().length;
+  const contractRoutes = new Map(); // "GET /issues/{id}" -> operationId
+  const METHODS = new Set(['get', 'post', 'put', 'delete', 'patch']);
+
+  let currentPath = null;
+  let currentPathIndent = 0;
+  let currentMethod = null;
+  let currentMethodIndent = 0;
+
+  for (const line of lines) {
+    const p = /^(\s*)(\/[^\s:]*):\s*$/.exec(line);
+    if (p) {
+      currentPath = p[2];
+      currentPathIndent = indentOf(p[1]);
+      continue;
+    }
+    const m = /^(\s*)(get|post|put|delete|patch):\s*$/.exec(line);
+    if (m && currentPath) {
+      currentMethod = m[2].toUpperCase();
+      currentMethodIndent = indentOf(m[1]);
+      continue;
+    }
+    if (currentMethod && currentMethodIndent > 0 && /^\s*\S/.test(line) && indentOf(line) < currentMethodIndent) {
+      currentMethod = null;
+      continue;
+    }
+    const op = /^\s*operationId:\s*(\S+)\s*$/.exec(line);
+    if (op && currentPath && currentMethod) {
+      contractRoutes.set(`${currentMethod} ${currentPath}`, op[1]);
+    }
+    void currentPathIndent;
+  }
+
+  // The registered routes, from the mock source. `:id` in MSW becomes `{id}` to
+  // match the contract's `{id}`, and `${API}` is dropped because it is the same
+  // prefix on every route.
+  //
+  // Recursive, because the handlers live in `src/mock/handlers/` while the
+  // composition lives in `src/mock/handlers.ts`. A flat read of the directory found
+  // none of the ten handler modules and reported 0 of 56 covered - a coverage gate
+  // that reads as a catastrophic finding is a gate nobody trusts, so it has to walk
+  // the tree the handlers actually live in.
+  const mockDir = join(webRoot, 'src', 'mock');
+  const walkTs = (dir) =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) return walkTs(full);
+      return entry.name.endsWith('.ts') && !entry.name.endsWith('.spec.ts') ? [full] : [];
+    });
+
+  const registered = new Map(); // route -> [files]
+  for (const file of walkTs(mockDir)) {
+    const src = readFileSync(file, 'utf8');
+    const rel = relative(webRoot, file).replace(/\\/g, '/');
+    const re = /http\.(get|post|put|delete|patch)\(\s*`\$\{API\}([^`]*)`/g;
+    for (const m of src.matchAll(re)) {
+      const route = `${m[1].toUpperCase()} ${m[2].replace(/:(\w+)/g, '{$1}')}`;
+      if (!registered.has(route)) registered.set(route, []);
+      registered.get(route).push(rel);
+    }
+  }
+
+  const uncovered = [...contractRoutes.keys()].filter((r) => !registered.has(r)).sort();
+  for (const r of uncovered) {
+    problems.push(`mock coverage - no handler for ${r} (${contractRoutes.get(r)})`);
+  }
+
+  const duplicated = [...registered.entries()].filter(([, files]) => files.length > 1);
+  for (const [route, files] of duplicated) {
+    problems.push(
+      `mock coverage - ${route} is registered in ${files.length} places (${files.join(', ')}); MSW silently uses the first`,
+    );
+  }
+
+  const orphans = [...registered.keys()].filter((r) => !contractRoutes.has(r)).sort();
+  for (const r of orphans) {
+    problems.push(`mock coverage - handler for ${r}, which the contract does not declare`);
+  }
+
+  const covered = [...contractRoutes.keys()].filter((r) => registered.has(r)).length;
+  note(
+    `mock server covers ${covered} of ${contractRoutes.size} contract operations` +
+      `${uncovered.length || duplicated.length || orphans.length ? '' : ' (no gaps, no duplicates)'}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 5. Authorisation drift: `x-required-roles` and `security` must tell the same
 //    story, and a status code must actually be inside `responses`.
 //

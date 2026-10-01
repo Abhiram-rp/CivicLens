@@ -315,20 +315,30 @@ describe('the mock server refuses a misplaced credential', () => {
   });
 
   it('rejects a bearer on /auth/**', async () => {
+    // 400 VALIDATION_ERROR, checked before the body is read. Not 401: the endpoint
+    // declares no `bearerAuth`, so there is nothing to re-authenticate against, and a
+    // 401 would send the client into a refresh-and-retry loop that can never
+    // succeed. Refusing before the body is also parsed is the part that matters - the
+    // status must not vary with whether the payload would have validated.
     const response = await fetch(`${API}/auth/refresh`, {
       method: 'POST',
       headers: { Authorization: 'Bearer mock-token-CITIZEN' },
     });
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(400);
+    expect((await response.json()).code).toBe('VALIDATION_ERROR');
   });
 
   it('rejects a tracked call with the wrong token', async () => {
+    // 404, not 403. An unrecognised token is indistinguishable from a token that is
+    // valid for a report the caller cannot reach, and it has to stay that way: a 403
+    // would confirm the token exists as a token, turning the tracked tree into an
+    // oracle for guessing someone else's device token.
     const response = await fetch(`${API}/tracked/issues`, {
       headers: { 'X-Tracking-Token': 'not-the-token' },
     });
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
   });
 
   it('serves the tracked tree to a correct token', async () => {
