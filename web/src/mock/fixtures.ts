@@ -402,14 +402,20 @@ export function resetTrackedReports(): void {
  * channel is never returned to anyone, and a mock that returned it would let a UI
  * grow comfortable displaying one.
  *
- * There is no `photoCount` parameter. `IssueDetail` has no such field, even though
- * `IssueSummary`, `TrackedIssueDetail` and `PublicIssue` all do - the create
- * response simply does not report it. An earlier version of this builder accepted
- * a `photoCount` and dropped it, which read as though the value were being
- * returned and quietly lost. The limit is still enforced on the way in
- * (`ISSUE_LIMITS`), and the count is still part of the idempotency fingerprint,
- * so attaching or removing a photo still counts as a different submission; but
- * nothing claims the server tells the reporter how many photos arrived.
+ * `photoCount` is the count that was *accepted*, which is a weaker claim than it
+ * looks and is worth spelling out before a UI starts trusting it. The contract
+ * carries the same caveat: a reporter who attaches two photos and reads back a
+ * count of 2 knows the request carried two files, not that two images are visible
+ * to an officer. This mock has no storage at all, so any stronger guarantee would
+ * be something the mock invented and a real backend would not honour.
+ *
+ * An earlier version of this builder accepted a `photoCount` and dropped it, which
+ * read as though the value were being returned and quietly lost. The limit was
+ * enforced on the way in and the count fed the idempotency fingerprint, so the
+ * information existed and was being discarded at the last step. That is fixed by
+ * the field existing on `IssueDetail` at all - it was added to the contract for
+ * this reason, since the create response is the only place a reporter can be told
+ * their uploads arrived.
  */
 export function createdIssue(details: {
   title: string;
@@ -420,6 +426,7 @@ export function createdIssue(details: {
   latitude: number;
   longitude: number;
   address?: string | null;
+  photoCount?: number;
 }): IssueDetail {
   const concealed = details.disclosure === 'CONCEALED';
   const { id, publicCode } = nextCreatedReportIds();
@@ -451,6 +458,7 @@ export function createdIssue(details: {
     reporterId: null,
     reporterDisplayName: null,
     confirmationCount: 0,
+    photoCount: details.photoCount ?? 0,
     createdAt: at(0),
   };
 }

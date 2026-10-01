@@ -548,6 +548,7 @@ export const handlers = [
       latitude: body.latitude!,
       longitude: body.longitude!,
       address: body.address ?? null,
+      photoCount: body.photos?.length ?? 0,
     });
 
     // SPEC 7.1: the contact address is never echoed back, to anyone. A mock that

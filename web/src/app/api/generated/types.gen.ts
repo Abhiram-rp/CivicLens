@@ -439,6 +439,22 @@ export type IssueDetail = {
     assignedOfficerName?: string | null;
     confirmationCount?: number;
     /**
+     * How many photos are attached. Present on `IssueSummary`,
+     * `TrackedIssueDetail` and `PublicIssue`, and added here because the
+     * create response is the only place a reporter can be told their uploads
+     * arrived. A reporter who attaches two photos and reads nothing back has
+     * no way to know whether they were accepted, and a silently dropped
+     * attachment is exactly the failure that erodes trust in a system whose
+     * whole purpose is being believed.
+     *
+     * The limit is 3 (`IssueCreateForm.photos`). A count within the limit
+     * says nothing about the images having been *stored* - this is the count
+     * that was accepted, and a client must not render "2 photos attached" as
+     * confirmation that two images are visible to an officer.
+     *
+     */
+    photoCount?: number;
+    /**
      * True when triage fell back to manual because the AI provider failed. Drives the manager-facing banner; meaningless to a citizen.
      */
     aiUnavailable?: boolean;
