@@ -237,10 +237,8 @@ try {
   const lines = contract.split('\n');
   const indentOf = (line) => line.length - line.trimStart().length;
   const contractRoutes = new Map(); // "GET /issues/{id}" -> operationId
-  const METHODS = new Set(['get', 'post', 'put', 'delete', 'patch']);
 
   let currentPath = null;
-  let currentPathIndent = 0;
   let currentMethod = null;
   let currentMethodIndent = 0;
 
@@ -248,7 +246,6 @@ try {
     const p = /^(\s*)(\/[^\s:]*):\s*$/.exec(line);
     if (p) {
       currentPath = p[2];
-      currentPathIndent = indentOf(p[1]);
       continue;
     }
     const m = /^(\s*)(get|post|put|delete|patch):\s*$/.exec(line);
@@ -265,7 +262,6 @@ try {
     if (op && currentPath && currentMethod) {
       contractRoutes.set(`${currentMethod} ${currentPath}`, op[1]);
     }
-    void currentPathIndent;
   }
 
   // The registered routes, from the mock source. `:id` in MSW becomes `{id}` to
