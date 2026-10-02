@@ -407,6 +407,93 @@ function seededIssues(categories: StoredCategory[]): StoredIssue[] {
       now: '2026-03-02T09:15:00.000Z',
     },
     {
+      // A RESOLVED *concealed* report, owned by the tracking token.
+      //
+      // This exists so `/tracked/issues/{id}/confirm` and `/reopen` are reachable at
+      // all. The other concealed report is `AI_ANALYZING` with no department and no
+      // officer, and nothing in the contract can move it forward: triage is
+      // system-driven with no operation, `assignIssue` needs a department to match, and
+      // `resolveIssue` needs the assignee. Without this row those two operations are
+      // unreachable dead code, so a concealed reporter could never close their own
+      // report - the one thing the tracked tree exists to let them do.
+      id: 'iss-concealed-resolved',
+      publicCode: 'CL-2026-0004',
+      title: 'Dark alley behind the parade of shops',
+      description: 'The alley is unlit after nine in the evening and it feels unsafe walking home.',
+      status: 'RESOLVED',
+      statusLabel: STATUS_LABELS['RESOLVED'],
+      priority: 'MEDIUM',
+      priorityScore: 48,
+      priorityBreakdown: null,
+      severity: 'MEDIUM',
+      categoryId: lighting?.id ?? null,
+      categoryName: lighting?.name ?? null,
+      subcategoryId: 'cat-lighting-out',
+      subcategoryName: 'Street lighting not working',
+      proposedCategoryText: null,
+      disclosure: 'CONCEALED',
+      latitude: 51.5123,
+      longitude: -0.1145,
+      address: null,
+      areaLabel: 'Parade of shops',
+      reporterId: null,
+      reporterDisplayName: 'Concealed reporter',
+      assignedDepartmentId: 'dept-roads',
+      assignedDepartmentName: 'Roads and Highways',
+      assignedOfficerId: 'usr-officer-1',
+      assignedOfficerName: 'Priya Raman',
+      confirmationCount: 0,
+      photoCount: 0,
+      aiUnavailable: false,
+      aiSuggestions: [],
+      attachments: [],
+      statusHistory: [
+        {
+          id: 'ste-c1',
+          toStatus: 'SUBMITTED',
+          changedById: null,
+          changedByName: 'Concealed reporter',
+          reason: 'Report received.',
+          createdAt: at(-21),
+        },
+        {
+          id: 'ste-c2',
+          toStatus: 'RESOLVED',
+          changedById: 'usr-officer-1',
+          changedByName: 'Priya Raman',
+          reason: 'A second lamp fitted and tested after dark.',
+          createdAt: at(-2),
+        },
+      ],
+      sla: {
+        deadline: at(-17),
+        state: 'RESOLVED_WITHIN_SLA',
+        resolveWithinHours: 48,
+        lastEvaluatedAt: at(-2),
+      },
+      resolutionReport: {
+        id: 'res-concealed-1',
+        notes: 'A second lamp fitted and tested after dark.',
+        aiSummary: null,
+        officerId: 'usr-officer-1',
+        officerName: 'Priya Raman',
+        submittedAt: at(-2),
+      },
+      contactState: 'VERIFIED',
+      contactEmail: 'concealed-resolved@example.org',
+      // resolvedAt + REOPEN_WINDOW_DAYS.
+      approvalDeadline: at(12),
+      createdAt: at(-21),
+      updatedAt: at(-2),
+      resolvedAt: at(-2),
+      closedAt: null,
+      reopenWindowEndsAt: at(12),
+      awaitingConfirmation: true,
+      revealRequested: false,
+      createKey: null,
+      now: '2026-03-02T09:15:00.000Z',
+    },
+    {
       // A RESOLVED shared report, so the approval gate has something to act on
       // without a test having to drive four transitions first.
       id: 'iss-shared-2',
@@ -740,7 +827,11 @@ export function seedState(): MockState {
       [MOCK_DECISION_TOKEN, { issueId: 'iss-shared-2', expiresAt: at(13), used: false }],
     ]),
     // The seeded concealed report is reachable by the documented fixture token.
-    trackedTokens: new Map([[MOCK_TRACKING_TOKEN, ['iss-concealed-1']]]),
+    // One token, two reports: SPEC allows a single tracking token to own more than one
+  // report, and that is what lets a reporter who filed twice stay in one place.
+  trackedTokens: new Map([
+    [MOCK_TRACKING_TOKEN, ['iss-concealed-1', 'iss-concealed-resolved']],
+  ]),
     sequence: { issue: 100, comment: 10, revision: 0, audit: 10, user: 10, duplicate: 10, trace: 0 },
   };
 }

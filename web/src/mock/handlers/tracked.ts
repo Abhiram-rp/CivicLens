@@ -220,7 +220,12 @@ export const trackedHandlers = [
     // The concealed counterpart of `POST /issues/{id}/confirm`, and the only way a
     // concealed report ever reaches CLOSED. A concealed reporter who is satisfied
     // closes their own report; nobody closes it for them.
-    const verdict = evaluateTransition(issue.status, 'CLOSED', { role: null, userId: null, displayName: 'concealed reporter' }, { isReporter: true });
+    // `role: 'CITIZEN'`, not null: concealment changes who can *see* the reporter,
+// never what they may do. A concealed reporter is a reporter, so the same
+// reporter-owned edges apply. Passing null here made every tracked transition
+// unreachable, because the machine refuses a null role before it ever looks at
+// `isReporter` - which silently killed both `/confirm` and `/reopen`.
+    const verdict = evaluateTransition(issue.status, 'CLOSED', { role: 'CITIZEN', userId: null, displayName: 'concealed reporter' }, { isReporter: true });
     if (!verdict.allowed) {
       return conflict(path, verdict.reason);
     }
@@ -265,7 +270,7 @@ export const trackedHandlers = [
       );
     }
 
-    const verdict = evaluateTransition(issue.status, 'REOPENED', { role: null, userId: null, displayName: 'concealed reporter' }, { isReporter: true });
+    const verdict = evaluateTransition(issue.status, 'REOPENED', { role: 'CITIZEN', userId: null, displayName: 'concealed reporter' }, { isReporter: true });
     if (!verdict.allowed) {
       return conflict(path, verdict.reason);
     }
