@@ -5,20 +5,25 @@ import { asPublicIssue } from '../projections';
 import { state } from '../store';
 
 /**
- * `/public/**` and `/reference/**`: the two trees a signed-out visitor uses.
+ * `/public/**` and `/reference/**`: the two trees a signed-out visitor uses, and both
+ * of which the report form depends on before anyone has an account.
  *
- * ## The credential rules are opposite, and that is the point
+ * ## Both carry `security: []`, so both refuse a bearer
  *
- * `/public/issues/{publicCode}` carries `security: []` in the contract, so a bearer
- * arriving here is a bug in `session-policy.ts` and is refused as a malformed
- * request - 400, not 403, because no role is allowed on this endpoint and a 403
- * would read as "your role is not permitted".
+ * The contract marks `/public/issues/{publicCode}` and both `/reference/**` operations
+ * `security: []` - no credential is required. An anonymous request is therefore the
+ * legitimate one, and a bearer arriving at either is a bug in the caller's
+ * `session-policy.ts`, refused as a malformed request.
  *
- * `/reference/**` carries the *global* bearer: a signed-in caller is expected to
- * send one, and an anonymous one is refused with 401. An earlier draft of this mock
- * rejected a bearer here "to be safe", which 403'd every legitimate request - and a
- * mock that disagrees with the contract is worse than no mock, because it teaches
- * the UI to work around a rule that does not exist.
+ * 400, not 403, because no role is permitted on these endpoints: a 403 would read as
+ * "your role is not allowed here", which would send the UI looking for a different role
+ * when the real fault is that it sent credentials at all.
+ *
+ * Note the earlier draft of this comment claimed the opposite - that `/reference/**`
+ * took the global bearer and refused anonymous callers with 401 - and the handlers did
+ * not match it either. The contract is the authority here: all three operations are
+ * `security: []`, so a report form that loads categories before sign-in works, and one
+ * that leaks a bearer into the request gets told so.
  */
 
 /** `GET /public/issues/{publicCode}`. */
